@@ -12,7 +12,6 @@ export default {
       const key = `gtfs/${m[1]}/${m[2]}`;
       return serveObject(req, env.DATA, key, { ttl: 31536000, immutable: true });
     }
-
     return new Response("Not found", { status: 404, headers: corsHeaders() });
   }
 };
