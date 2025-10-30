@@ -2,9 +2,9 @@ name = "dartdublin-data"
 main = "src/worker.mjs"
 compatibility_date = "2025-10-29"
 
-r2_buckets = [
-  { binding = "DATA", bucket_name = "dartdublin-gtfs" }
-]
+[[r2_buckets]]
+binding = "DATA"
+bucket_name = "dartdublin-gtfs"
 
 routes = [
   { pattern = "dartdublin-gtfs-api-endpoint.kgans.com/*", zone_name = "kgans.com" }

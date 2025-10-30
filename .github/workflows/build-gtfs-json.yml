@@ -48,7 +48,25 @@ jobs:
           VER=$(jq -r '.latest' out/latest.json)
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
+      - name: Check remote latest
+        id: diff
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          wrangler r2 object get "${R2_BUCKET}/latest.json" --file prev_latest.json || echo '{}' > prev_latest.json
+          PREV=$(jq -r '.latest // empty' prev_latest.json)
+          CURR="${{ steps.ver.outputs.version }}"
+          if [ -n "$PREV" ] && [ "$PREV" = "$CURR" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload versioned JSON to R2
+        if: steps.diff.outputs.changed == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -65,6 +83,7 @@ jobs:
           done
 
       - name: Upload pointers to R2
+        if: steps.diff.outputs.changed == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -80,6 +99,7 @@ jobs:
             --content-type "application/json"
 
       - name: Deploy Worker
+        if: steps.diff.outputs.changed == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
