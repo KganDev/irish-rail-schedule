@@ -59,10 +59,29 @@ jobs:
           find "$ROOT" -type f -name '*.json' | while read -r f; do
             key="gtfs/${{ steps.ver.outputs.version }}/${f##*/}"
             wrangler r2 object put "${R2_BUCKET}/${key}" \
-              --local "$f" \
+              --file "$f" \
               --cache-control "public, max-age=31536000, immutable" \
-              --content-type "application/json"
+              --content-type "application/json" \
+              --account-id "$CLOUDFLARE_ACCOUNT_ID"
           done
+
+      - name: Upload pointers to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          wrangler r2 object put "${R2_BUCKET}/latest.json" \
+            --file out/latest.json \
+            --cache-control "public, max-age=60" \
+            --content-type "application/json" \
+            --account-id "$CLOUDFLARE_ACCOUNT_ID"
+          wrangler r2 object put "${R2_BUCKET}/status.json" \
+            --file out/status.json \
+            --cache-control "public, max-age=30" \
+            --content-type "application/json" \
+            --account-id "$CLOUDFLARE_ACCOUNT_ID"
+
 
       - name: Upload pointers to R2
         env:
