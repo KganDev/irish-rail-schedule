@@ -10,4 +10,4 @@ routes = [
 
 [[r2_buckets]]
 binding = "DATA"
-bucket_name = "dartdublin"
+bucket_name = "dartdublin-gtfs"
