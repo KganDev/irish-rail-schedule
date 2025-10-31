@@ -65,6 +65,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+
       - name: Upload versioned JSON to R2
         if: steps.diff.outputs.changed == 'true'
         env:
@@ -106,19 +107,12 @@ jobs:
           wranglerVersion: '4'
           command: deploy
 
-
       - name: Smoke test
         env:
           HOST: dartdublin-gtfs-api-endpoint.kgans.com
         run: |
           set -euo pipefail
-          echo "== /__health =="
-          curl -sS -i "https://${HOST}/__health" || true
-          echo "== /latest.json (headers) =="
-          curl -sS -i --fail-with-body "https://${HOST}/latest.json" || exit 1
-          echo "== /latest.json (body) =="
-          curl -sS --fail-with-body "https://${HOST}/latest.json" | tee /tmp/latest.json
-          V=$(jq -r '.latest' /tmp/latest.json)
-          echo "version=$V"
-          echo "== /gtfs/${V}/stops.json (one item) =="
-          curl -sS --fail-with-body "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
+          curl -fsS "https://${HOST}/__health" | jq .
+          curl -fsS "https://${HOST}/latest.json" | jq .
+          V=$(curl -fsS "https://${HOST}/latest.json" | jq -r '.latest')
+          curl -fsS "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
