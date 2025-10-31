@@ -65,16 +65,6 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Detect worker changes
-        id: worker
-        run: |
-          set -euo pipefail
-          if git rev-parse HEAD^ >/dev/null 2>&1 && git diff --name-only HEAD^ HEAD | grep -E '^(src/worker\.mjs|wrangler\.toml)$' >/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Upload versioned JSON to R2
         if: steps.diff.outputs.changed == 'true'
         env:
@@ -109,7 +99,6 @@ jobs:
             --content-type "application/json"
 
       - name: Deploy Worker
-        if: steps.diff.outputs.changed == 'true' || steps.worker.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -124,10 +113,11 @@ jobs:
           set -euo pipefail
           echo "== /__health =="
           curl -sS -i "https://${HOST}/__health" || true
-          echo "== /latest.json =="
-          curl -sS --fail-with-body -i "https://${HOST}/latest.json" | tee /tmp/resp.txt >/dev/null
-          jq . < <(tail -n +1 /tmp/resp.txt | sed -n '/^\r*$/,$p') || true
-          V=$(tail -n +1 /tmp/resp.txt | sed -n '/^\r*$/,$p' | jq -r '.latest')
+          echo "== /latest.json (headers) =="
+          curl -sS -i --fail-with-body "https://${HOST}/latest.json" || exit 1
+          echo "== /latest.json (body) =="
+          curl -sS --fail-with-body "https://${HOST}/latest.json" | tee /tmp/latest.json
+          V=$(jq -r '.latest' /tmp/latest.json)
           echo "version=$V"
-          echo "== /gtfs/${V}/stops.json =="
+          echo "== /gtfs/${V}/stops.json (one item) =="
           curl -sS --fail-with-body "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
