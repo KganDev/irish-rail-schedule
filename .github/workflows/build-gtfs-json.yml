@@ -122,6 +122,12 @@ jobs:
           HOST: dartdublin-gtfs-api-endpoint.kgans.com
         run: |
           set -euo pipefail
-          curl -fsS "https://${HOST}/latest.json" | jq .
-          V=$(curl -fsS "https://${HOST}/latest.json" | jq -r '.latest')
-          curl -fsS "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
+          echo "== /__health =="
+          curl -sS -i "https://${HOST}/__health" || true
+          echo "== /latest.json =="
+          curl -sS --fail-with-body -i "https://${HOST}/latest.json" | tee /tmp/resp.txt >/dev/null
+          jq . < <(tail -n +1 /tmp/resp.txt | sed -n '/^\r*$/,$p') || true
+          V=$(tail -n +1 /tmp/resp.txt | sed -n '/^\r*$/,$p' | jq -r '.latest')
+          echo "version=$V"
+          echo "== /gtfs/${V}/stops.json =="
+          curl -sS --fail-with-body "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
