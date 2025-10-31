@@ -1,68 +1,126 @@
-// src/worker.mjs
-export default {
-  async fetch(req, env) {
-    const url = new URL(req.url);
+export interface Env {
+  GTFS: R2Bucket;
+}
 
-    if (req.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
+const ONE_YEAR = 31536000; 
+const SHORT_60 = 60;
+const SHORT_30 = 30;
+
+const JSON_FILES = new Set([
+  "stops.json",
+  "routes.json",
+  "trips.json",
+  "stop_times.json",
+  "calendar.json",
+  "calendar_dates.json",
+  "agencies.json",
+]);
+
+function cors(h = new Headers()) {
+  h.set("Access-Control-Allow-Origin", "*");
+  h.set("Vary", "Origin");
+  return h;
+}
+
+function withCommon(h: Headers, contentType = "application/json; charset=utf-8") {
+  h.set("Content-Type", contentType);
+  return h;
+}
+
+async function serveR2Object(
+  request: Request,
+  env: Env,
+  key: string,
+  ttlSeconds: number,
+  immutable = false
+): Promise<Response> {
+  const cache = caches.default;
+  const cacheKey = new Request(new URL(`https://edge-cache/${key}`).toString(), { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached && request.method !== "HEAD") {
+    const inm = request.headers.get("If-None-Match");
+    if (inm && cached.headers.get("ETag") && inm === cached.headers.get("ETag")) {
+      return new Response(null, { status: 304, headers: cached.headers });
     }
+    return cached;
+  }
 
-    if (url.pathname === "/__health") {
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "content-type": "application/json", ...corsHeaders() }
+  const obj = await env.GTFS.get(key);
+  if (!obj) {
+    return new Response(JSON.stringify({ error: "not found", key }), {
+      status: 404,
+      headers: withCommon(cors()),
+    });
+  }
+
+  const metaType = obj.httpMetadata?.contentType || "application/json; charset=utf-8";
+  const h = withCommon(cors(), metaType);
+  const etag = obj.httpEtag;
+  if (etag) h.set("ETag", etag);
+
+  const inm = request.headers.get("If-None-Match");
+  if (etag && inm && inm === etag) {
+    return new Response(null, { status: 304, headers: h });
+  }
+
+  const cc = `public, max-age=${ttlSeconds}${immutable ? ", immutable" : ""}`;
+  h.set("Cache-Control", cc);
+
+  const res =
+    request.method === "HEAD"
+      ? new Response(null, { status: 200, headers: h })
+      : new Response(obj.body, { status: 200, headers: h });
+
+  if (request.method === "GET") {
+    eventWaitUntilSafe(cache.put(cacheKey, res.clone()));
+  }
+  return res;
+}
+function eventWaitUntilSafe(p: Promise<any>) {
+  (globalThis as any).waitUntil?.(p);
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      const url = new URL(request.url);
+
+      if (url.pathname === "/__health") {
+        return new Response("ok", { status: 200, headers: cors() });
+      }
+
+      if (url.pathname === "/latest.json") {
+        return serveR2Object(request, env, "latest.json", SHORT_60, false);
+      }
+      if (url.pathname === "/status.json") {
+        return serveR2Object(request, env, "status.json", SHORT_30, false);
+      }
+      if (url.pathname === "/windows.json") {
+        return serveR2Object(request, env, "windows.json", 3600, false);
+      }
+
+      const m = url.pathname.match(/^\/gtfs\/([A-Za-z0-9-]+)\/([a-z_]+\.json)$/);
+      if (m) {
+        const [, ver, file] = m;
+        if (!JSON_FILES.has(file)) {
+          return new Response(JSON.stringify({ error: "invalid file" }), {
+            status: 400,
+            headers: withCommon(cors()),
+          });
+        }
+        const key = `gtfs/${ver}/${file}`;
+        return serveR2Object(request, env, key, ONE_YEAR, true);
+      }
+
+      return new Response(JSON.stringify({ error: "not found" }), {
+        status: 404,
+        headers: withCommon(cors()),
+      });
+    } catch (err: any) {
+      return new Response(JSON.stringify({ error: "internal", detail: String(err?.message || err) }), {
+        status: 500,
+        headers: withCommon(cors()),
       });
     }
-
-    if (url.pathname === "/latest.json" || url.pathname === "/status.json") {
-      return serveObject(req, env.DATA, url.pathname.slice(1), { ttl: 60, immutable: false });
-    }
-
-    const m = url.pathname.match(/^\/gtfs\/([A-Za-z0-9-]+)\/([a-z_]+\.json)$/);
-    if (m) {
-      const key = `gtfs/${m[1]}/${m[2]}`;
-      return serveObject(req, env.DATA, key, { ttl: 31536000, immutable: true });
-    }
-
-    return new Response("Not found", { status: 404, headers: corsHeaders() });
-  }
+  },
 };
-
-function corsHeaders() {
-  const h = new Headers();
-  h.set("Access-Control-Allow-Origin", "*");
-  h.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
-  h.set("Access-Control-Allow-Headers", "If-None-Match, Content-Type");
-  h.set("Access-Control-Max-Age", "86400");
-  return h;
-}
-
-async function serveObject(req, bucket, key, { ttl, immutable }) {
-  const obj = await bucket.get(key);
-  if (!obj) return new Response("Not found", { status: 404, headers: corsHeaders() });
-
-  const etag = obj.httpEtag || obj.etag || null;
-  const reqETag = req.headers.get("If-None-Match");
-
-  if (req.method === "HEAD") {
-    return new Response(null, { status: 200, headers: headersFor(obj, { ttl, immutable, etag }) });
-  }
-
-  if (reqETag && etag && stripW(reqETag) === stripW(etag)) {
-    return new Response(null, { status: 304, headers: headersFor(obj, { ttl, immutable, etag }) });
-  }
-
-  return new Response(obj.body, { headers: headersFor(obj, { ttl, immutable, etag }) });
-}
-
-function headersFor(obj, { ttl, immutable, etag }) {
-  const h = corsHeaders();
-  const cc = immutable ? `public, max-age=${ttl}, immutable` : `public, max-age=${ttl}`;
-  h.set("Cache-Control", cc);
-  h.set("Content-Type", obj.httpMetadata?.contentType || "application/json");
-  if (etag) h.set("ETag", etag);
-  return h;
-}
-
-function stripW(tag) {
-  return tag.replace(/^W\//, "").replace(/"/g, "");
-}
