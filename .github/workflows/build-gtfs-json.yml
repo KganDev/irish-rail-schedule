@@ -71,18 +71,23 @@ jobs:
           name = "dartdublin-gtfs-api"
           main = "src/index.ts"
           compatibility_date = "2025-10-31"
-          r2_buckets = [
-            { binding = "GTFS", bucket_name = "${R2_BUCKET}" }
-          ]
+          workers_dev = false
           routes = [
-            { pattern = "${PUBLIC_HOST}/*" }
+            { pattern = "${PUBLIC_HOST}/*", zone_name = "kgans.com" }
           ]
+          [[r2_buckets]]
+          binding = "GTFS"
+          bucket_name = "${R2_BUCKET}"
           EOF
+      - name: Ensure Worker entrypoint
+        run: test -f src/index.ts
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler deploy --config wrangler.toml
+
 
       - name: Smoke test
         run: |

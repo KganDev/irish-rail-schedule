@@ -82,11 +82,9 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url)
-
       if (url.pathname === "/__health") {
         return new Response("ok", { status: 200, headers: cors() })
       }
-
       if (url.pathname === "/latest.json") {
         return serveR2Object(request, env, "latest.json", SHORT_60, false, ctx)
       }
@@ -96,7 +94,6 @@ export default {
       if (url.pathname === "/windows.json") {
         return serveR2Object(request, env, "windows.json", 3600, false, ctx)
       }
-
       const m = url.pathname.match(/^\/gtfs\/([A-Za-z0-9-]+)\/([a-z_]+\.json)$/)
       if (m) {
         const [, ver, file] = m
@@ -109,7 +106,6 @@ export default {
         const key = `gtfs/${ver}/${file}`
         return serveR2Object(request, env, key, ONE_YEAR, true, ctx)
       }
-
       return new Response(JSON.stringify({ error: "not found" }), {
         status: 404,
         headers: withCommon(cors())
