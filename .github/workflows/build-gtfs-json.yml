@@ -8,6 +8,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    env:
+      GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
+      OUT_DIR: out
+      WINDOW_DAYS: "90"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,10 +27,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Build JSON
-        env:
-          GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
-          OUT_DIR: out
-          WINDOW_DAYS: "90"
         run: python scripts/gtfs_json_builder.py
 
       - name: Upload artifact
@@ -37,9 +39,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
-      - name: Install Wrangler v4
+      - name: Install Wrangler v4 (CLI)
         run: npm i -g wrangler@4
 
       - name: Read version
@@ -48,7 +50,7 @@ jobs:
           VER=$(jq -r '.latest' out/latest.json)
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Check remote latest
+      - name: Check remote latest (R2)
         id: diff
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -65,7 +67,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload versioned JSON to R2
+      - name: Upload versioned JSON to R2 (only when changed)
         if: steps.diff.outputs.changed == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -82,12 +84,13 @@ jobs:
               --content-type "application/json"
           done
 
-      - name: Upload pointers to R2
+      - name: Upload pointers to R2 (always)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
+          set -euo pipefail
           wrangler r2 object put --remote "${R2_BUCKET}/latest.json" \
             --file out/latest.json \
             --cache-control "public, max-age=60" \
@@ -98,24 +101,24 @@ jobs:
             --content-type "application/json"
           wrangler r2 object put --remote "${R2_BUCKET}/windows.json" \
             --file out/windows.json \
-            --cache-control "public, max-age=3600" \
+            --cache-control "public, max-age=300" \
             --content-type "application/json"
 
-      - name: Deploy Worker (idempotent)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: deploy
-        
+      - name: Deploy Worker (Wrangler CLI)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          wrangler deploy --account-id "$CLOUDFLARE_ACCOUNT_ID" --config wrangler.toml
+
       - name: Smoke test
         env:
           HOST: dartdublin-gtfs-api-endpoint.kgans.com
         run: |
           set -euo pipefail
-          echo "GET https://${HOST}/latest.json"
-          LATEST=$(curl -fsS "https://${HOST}/latest.json" | tee /dev/stderr | jq -r '.latest')
-          echo "latest=${LATEST}"
-          echo "GET https://${HOST}/gtfs/${LATEST}/stops.json (first object)"
-          curl -fsS "https://${HOST}/gtfs/${LATEST}/stops.json" | jq '.[0]'
+          echo "GET /latest.json"
+          curl -fsS "https://${HOST}/latest.json" | jq .
+          V=$(curl -fsS "https://${HOST}/latest.json" | jq -r '.latest')
+          echo "GET /gtfs/${V}/stops.json"
+          curl -fsS "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
