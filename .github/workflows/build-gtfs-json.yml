@@ -8,11 +8,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     env:
-      GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
-      OUT_DIR: out
-      WINDOW_DAYS: "90"
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      HOST: dartdublin-gtfs-api-endpoint.kgans.com
 
     steps:
       - name: Checkout
@@ -27,6 +27,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Build JSON
+        env:
+          GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
+          OUT_DIR: out
+          WINDOW_DAYS: "90"
         run: python scripts/gtfs_json_builder.py
 
       - name: Upload artifact
@@ -36,26 +40,17 @@ jobs:
           path: out/
           if-no-files-found: error
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Wrangler v4 (CLI)
-        run: npm i -g wrangler@4
-
       - name: Read version
         id: ver
         run: |
           VER=$(jq -r '.latest' out/latest.json)
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Check remote latest (R2)
+      - name: Install Wrangler v4 (CLI for R2 puts)
+        run: npm i -g wrangler@4
+
+      - name: Check remote latest
         id: diff
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
           wrangler r2 object get --remote "${R2_BUCKET}/latest.json" --file prev_latest.json || echo '{}' > prev_latest.json
@@ -67,12 +62,8 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload versioned JSON to R2 (only when changed)
+      - name: Upload versioned JSON to R2 (if changed)
         if: steps.diff.outputs.changed == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
           ROOT="out/gtfs/${{ steps.ver.outputs.version }}"
@@ -85,40 +76,31 @@ jobs:
           done
 
       - name: Upload pointers to R2 (always)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          set -euo pipefail
           wrangler r2 object put --remote "${R2_BUCKET}/latest.json" \
             --file out/latest.json \
             --cache-control "public, max-age=60" \
             --content-type "application/json"
+
           wrangler r2 object put --remote "${R2_BUCKET}/status.json" \
             --file out/status.json \
             --cache-control "public, max-age=30" \
             --content-type "application/json"
+
           wrangler r2 object put --remote "${R2_BUCKET}/windows.json" \
             --file out/windows.json \
             --cache-control "public, max-age=300" \
             --content-type "application/json"
 
-      - name: Deploy Worker (Wrangler CLI)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          wrangler deploy --account-id "$CLOUDFLARE_ACCOUNT_ID" --config wrangler.toml
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy --config wrangler.toml
 
       - name: Smoke test
-        env:
-          HOST: dartdublin-gtfs-api-endpoint.kgans.com
         run: |
           set -euo pipefail
-          echo "GET /latest.json"
           curl -fsS "https://${HOST}/latest.json" | jq .
           V=$(curl -fsS "https://${HOST}/latest.json" | jq -r '.latest')
-          echo "GET /gtfs/${V}/stops.json"
           curl -fsS "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
