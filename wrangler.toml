@@ -2,13 +2,13 @@ name = "dartdublin-gtfs"
 main = "src/index.ts"
 compatibility_date = "2025-10-31"
 
-# binding = "DATA"
+
 routes = [
   { pattern = "dartdublin-gtfs-api-endpoint.kgans.com/*", zone_name = "kgans.com" }
 ]
 
 r2_buckets = [
-  { binding = "GTFS", bucket_name = "dartdublin-gtfs" }
+  { binding = "DATA", bucket_name = "dartdublin-gtfs" }
 ]
 
 [observability]
