@@ -106,6 +106,7 @@ jobs:
           wranglerVersion: '4'
           command: deploy
 
+
       - name: Smoke test
         env:
           HOST: dartdublin-gtfs-api-endpoint.kgans.com
