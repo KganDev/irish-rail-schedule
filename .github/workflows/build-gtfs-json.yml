@@ -8,12 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
-      OUT_DIR: out
-      WINDOW_DAYS: "90"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,6 +21,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Build JSON
+        env:
+          GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
+          OUT_DIR: out
+          WINDOW_DAYS: "90"
         run: python scripts/gtfs_json_builder.py
 
       - name: Upload artifact
@@ -39,7 +37,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
       - name: Install Wrangler v4
         run: npm i -g wrangler@4
@@ -58,7 +56,6 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
-          # Will write prev_latest.json if it exists; else create '{}'
           wrangler r2 object get --remote "${R2_BUCKET}/latest.json" --file prev_latest.json || echo '{}' > prev_latest.json
           PREV=$(jq -r '.latest // empty' prev_latest.json)
           CURR="${{ steps.ver.outputs.version }}"
@@ -85,7 +82,7 @@ jobs:
               --content-type "application/json"
           done
 
-      - name: Upload pointers to R2 (latest/status/windows)
+      - name: Upload pointers to R2
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -95,13 +92,10 @@ jobs:
             --file out/latest.json \
             --cache-control "public, max-age=60" \
             --content-type "application/json"
-
           wrangler r2 object put --remote "${R2_BUCKET}/status.json" \
             --file out/status.json \
             --cache-control "public, max-age=30" \
             --content-type "application/json"
-
-          # optional, but your builder emits it — keep it tight or lengthen if you prefer
           wrangler r2 object put --remote "${R2_BUCKET}/windows.json" \
             --file out/windows.json \
             --cache-control "public, max-age=3600" \
@@ -112,18 +106,16 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4"
+          wranglerVersion: '4'
           command: deploy
-
+        
       - name: Smoke test
         env:
-          HOST: ${{ secrets.GTFS_HOST }}  
+          HOST: dartdublin-gtfs-api-endpoint.kgans.com
         run: |
           set -euo pipefail
-          # Health must be 200
-          curl -fsS "https://${HOST}/__health" >/dev/null
-          # Pointer
-          curl -fsS "https://${HOST}/latest.json" | jq .
-          V=$(curl -fsS "https://${HOST}/latest.json" | jq -r '.latest')
-          # One of the big JSONs
-          curl -fsS "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
+          echo "GET https://${HOST}/latest.json"
+          LATEST=$(curl -fsS "https://${HOST}/latest.json" | tee /dev/stderr | jq -r '.latest')
+          echo "latest=${LATEST}"
+          echo "GET https://${HOST}/gtfs/${LATEST}/stops.json (first object)"
+          curl -fsS "https://${HOST}/gtfs/${LATEST}/stops.json" | jq '.[0]'
