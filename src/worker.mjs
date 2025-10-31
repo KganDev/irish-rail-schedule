@@ -1,18 +1,20 @@
 export default {
   async fetch(req, env) {
-    const url = new URL(req.url);
-    if (req.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
+    try {
+      const url = new URL(req.url);
+      if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders() });
+      if (url.pathname === "/latest.json" || url.pathname === "/status.json") {
+        return serveObject(req, env.DATA, url.pathname.slice(1), { ttl: 60, immutable: false });
+      }
+      const m = url.pathname.match(/^\/gtfs\/([A-Za-z0-9-]+)\/([a-z_]+\.json)$/);
+      if (m) {
+        const key = `gtfs/${m[1]}/${m[2]}`;
+        return serveObject(req, env.DATA, key, { ttl: 31536000, immutable: true });
+      }
+      return new Response("Not found", { status: 404, headers: corsHeaders() });
+    } catch {
+      return new Response("Server error", { status: 500, headers: corsHeaders() });
     }
-    if (url.pathname === "/latest.json" || url.pathname === "/status.json") {
-      return serveObject(req, env.DATA, url.pathname.slice(1), { ttl: 60, immutable: false });
-    }
-    const m = url.pathname.match(/^\/gtfs\/([A-Za-z0-9-]+)\/([a-z_]+\.json)$/);
-    if (m) {
-      const key = `gtfs/${m[1]}/${m[2]}`;
-      return serveObject(req, env.DATA, key, { ttl: 31536000, immutable: true });
-    }
-    return new Response("Not found", { status: 404, headers: corsHeaders() });
   }
 };
 
@@ -26,18 +28,21 @@ function corsHeaders() {
 }
 
 async function serveObject(req, bucket, key, { ttl, immutable }) {
-  const obj = await bucket.get(key);
-  if (!obj) return new Response("Not found", { status: 404, headers: corsHeaders() });
-
-  const etag = obj.httpEtag || obj.etag || null;
-  const reqETag = req.headers.get("If-None-Match");
-  if (req.method === "HEAD") {
-    return new Response(null, { status: 200, headers: headersFor(obj, { ttl, immutable, etag }) });
+  try {
+    const obj = await bucket.get(key);
+    if (!obj) return new Response("Not found", { status: 404, headers: corsHeaders() });
+    const etag = obj.httpEtag || obj.etag || null;
+    const reqETag = req.headers.get("If-None-Match");
+    if (req.method === "HEAD") {
+      return new Response(null, { status: 200, headers: headersFor(obj, { ttl, immutable, etag }) });
+    }
+    if (reqETag && etag && stripW(reqETag) === stripW(etag)) {
+      return new Response(null, { status: 304, headers: headersFor(obj, { ttl, immutable, etag }) });
+    }
+    return new Response(obj.body, { headers: headersFor(obj, { ttl, immutable, etag }) });
+  } catch {
+    return new Response("Server error", { status: 500, headers: corsHeaders() });
   }
-  if (reqETag && etag && stripW(reqETag) === stripW(etag)) {
-    return new Response(null, { status: 304, headers: headersFor(obj, { ttl, immutable, etag }) });
-  }
-  return new Response(obj.body, { headers: headersFor(obj, { ttl, immutable, etag }) });
 }
 
 function headersFor(obj, { ttl, immutable, etag }) {
@@ -45,7 +50,6 @@ function headersFor(obj, { ttl, immutable, etag }) {
   const cc = immutable ? `public, max-age=${ttl}, immutable` : `public, max-age=${ttl}`;
   h.set("Cache-Control", cc);
   h.set("Content-Type", obj.httpMetadata?.contentType || "application/json");
-  if (obj.size != null) h.set("Content-Length", String(obj.size));
   if (etag) h.set("ETag", etag);
   return h;
 }
