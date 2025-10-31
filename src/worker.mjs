@@ -66,10 +66,10 @@ function headersFor(obj, { ttl, immutable, etag }) {
   const cc = immutable ? `public, max-age=${ttl}, immutable` : `public, max-age=${ttl}`;
   h.set("Cache-Control", cc);
   h.set("Content-Type", obj.httpMetadata?.contentType || "application/json");
-  if (obj.size != null) h.set("Content-Length", String(obj.size));
   if (etag) h.set("ETag", etag);
   return h;
 }
+
 
 function stripW(tag) {
   return String(tag).replace(/^W\//, "").replace(/"/g, "");
