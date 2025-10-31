@@ -1,54 +1,44 @@
 name: Build GTFS JSON
-
 on:
   schedule:
     - cron: "15 2 * * *"
   workflow_dispatch: {}
-
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PUBLIC_HOST: ${{ secrets.PUBLIC_HOST }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      HOST: dartdublin-gtfs-api-endpoint.kgans.com
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
-
       - name: Build JSON
         env:
           GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
           OUT_DIR: out
           WINDOW_DAYS: "90"
         run: python scripts/gtfs_json_builder.py
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: gtfs-json
           path: out/
           if-no-files-found: error
-
       - name: Read version
         id: ver
         run: |
           VER=$(jq -r '.latest' out/latest.json)
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-
-      - name: Install Wrangler v4 (CLI for R2 puts)
+      - name: Install Wrangler
         run: npm i -g wrangler@4
-
       - name: Check remote latest
         id: diff
         run: |
@@ -61,46 +51,42 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Upload versioned JSON to R2 (if changed)
+      - name: Upload versioned JSON to R2
         if: steps.diff.outputs.changed == 'true'
         run: |
           set -euo pipefail
           ROOT="out/gtfs/${{ steps.ver.outputs.version }}"
           find "$ROOT" -type f -name '*.json' | while read -r f; do
             key="gtfs/${{ steps.ver.outputs.version }}/${f##*/}"
-            wrangler r2 object put --remote "${R2_BUCKET}/${key}" \
-              --file "$f" \
-              --cache-control "public, max-age=31536000, immutable" \
-              --content-type "application/json"
+            wrangler r2 object put --remote "${R2_BUCKET}/${key}" --file "$f" --cache-control "public, max-age=31536000, immutable" --content-type "application/json"
           done
-
-      - name: Upload pointers to R2 (always)
+      - name: Upload pointers to R2
         run: |
-          wrangler r2 object put --remote "${R2_BUCKET}/latest.json" \
-            --file out/latest.json \
-            --cache-control "public, max-age=60" \
-            --content-type "application/json"
-
-          wrangler r2 object put --remote "${R2_BUCKET}/status.json" \
-            --file out/status.json \
-            --cache-control "public, max-age=30" \
-            --content-type "application/json"
-
-          wrangler r2 object put --remote "${R2_BUCKET}/windows.json" \
-            --file out/windows.json \
-            --cache-control "public, max-age=300" \
-            --content-type "application/json"
-
+          wrangler r2 object put --remote "${R2_BUCKET}/latest.json" --file out/latest.json --cache-control "public, max-age=60" --content-type "application/json"
+          wrangler r2 object put --remote "${R2_BUCKET}/status.json" --file out/status.json --cache-control "public, max-age=30" --content-type "application/json"
+          wrangler r2 object put --remote "${R2_BUCKET}/windows.json" --file out/windows.json --cache-control "public, max-age=300" --content-type "application/json"
+      - name: Generate wrangler.toml
+        run: |
+          cat > wrangler.toml <<EOF
+          name = "dartdublin-gtfs-api"
+          main = "src/index.ts"
+          compatibility_date = "2025-10-31"
+          r2_buckets = [
+            { binding = "GTFS", bucket_name = "${R2_BUCKET}" }
+          ]
+          routes = [
+            { pattern = "${PUBLIC_HOST}/*" }
+          ]
+          EOF
       - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          command: deploy --config wrangler.toml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy --config wrangler.toml
 
       - name: Smoke test
         run: |
           set -euo pipefail
-          curl -fsS "https://${HOST}/latest.json" | jq .
-          V=$(curl -fsS "https://${HOST}/latest.json" | jq -r '.latest')
-          curl -fsS "https://${HOST}/gtfs/${V}/stops.json" | jq '.[0]'
+          curl -fsS "https://${PUBLIC_HOST}/latest.json" | jq .
+          V=$(curl -fsS "https://${PUBLIC_HOST}/latest.json" | jq -r '.latest')
+          curl -fsS "https://${PUBLIC_HOST}/gtfs/${V}/stops.json" | jq '.[0]'

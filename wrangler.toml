@@ -6,6 +6,7 @@ workers_dev = false
 routes = [
   { pattern = "dartdublin-gtfs-api-endpoint.kgans.com/*", zone_name = "kgans.com" }
 ]
+
 [[r2_buckets]]
-binding = "GTFS_R2"
+binding = "GTFS"
 bucket_name = "dartdublin-gtfs"
