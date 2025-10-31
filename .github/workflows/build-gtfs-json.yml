@@ -65,6 +65,16 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Detect worker changes
+        id: worker
+        run: |
+          set -euo pipefail
+          if git rev-parse HEAD^ >/dev/null 2>&1 && git diff --name-only HEAD^ HEAD | grep -E '^(src/worker\.mjs|wrangler\.toml)$' >/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload versioned JSON to R2
         if: steps.diff.outputs.changed == 'true'
         env:
@@ -99,7 +109,7 @@ jobs:
             --content-type "application/json"
 
       - name: Deploy Worker
-        if: steps.diff.outputs.changed == 'true'
+        if: steps.diff.outputs.changed == 'true' || steps.worker.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
