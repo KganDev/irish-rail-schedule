@@ -16,7 +16,6 @@ try:
 except Exception:
     ZoneInfo = None
 GTFS_URL_DEFAULT = "https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip"
-UNKNOWN_ROUTE_ID = "<unknown-route>"
 def _safe_float(v) -> float:
     try:
         s = ("" if v is None else str(v)).strip()
@@ -196,30 +195,6 @@ def _choose_service_winner_factual(
         winner = candidates[0]
         reasons.append(f"Tiebreaker: lexicographically highest service_id ({winner})")
         return (winner, reasons, False)
-def _build_route_grouping(
-    calendar_rows: List[Dict],
-    trips: List[Dict]
-) -> Tuple[Dict[Tuple[Tuple[bool, ...], Tuple[str, ...]], List[str]], Dict[str, Set[str]]]:
-    service_routes: Dict[str, Set[str]] = defaultdict(set)
-    for trip in trips:
-        service_id = trip.get("service_id")
-        if not service_id:
-            continue
-        route_id = trip.get("route_id") or UNKNOWN_ROUTE_ID
-        service_routes[service_id].add(route_id)
-
-    groups: Dict[Tuple[Tuple[bool, ...], Tuple[str, ...]], List[str]] = defaultdict(list)
-    for cal in calendar_rows:
-        service_id = cal.get("service_id")
-        if not service_id:
-            continue
-        mask = _weekday_mask(cal)
-        routes = tuple(sorted(service_routes.get(service_id) or {UNKNOWN_ROUTE_ID}))
-        groups[(mask, routes)].append(service_id)
-
-    return groups, service_routes
-
-
 def _prune_overlaps_factual(
     agencies: List[Dict],
     calendar_rows: List[Dict],
@@ -228,94 +203,35 @@ def _prune_overlaps_factual(
     stop_times: List[Dict],
     feed_info: List[Dict],
     overlap_max_days: int
-) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict], Dict]:
+) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
     pivot = datetime.utcnow().date()
     if feed_info:
         fs = _parse_ymd(feed_info[0].get("feed_start_date","") or "")
         if fs:
             if fs > pivot:
                 pivot = fs
-    print(f"  - Pivot date: {pivot:%Y-%m-%d}")
     calendars_dict = {cal["service_id"]: cal for cal in calendar_rows}
-    groups, _ = _build_route_grouping(calendar_rows, trips)
-
-    diagnostics = {
-        "pivot_date": pivot.strftime("%Y-%m-%d"),
-        "overlap_max_days": overlap_max_days,
-        "groups": [],
-        "summary": {
-            "total_groups": len(groups),
-            "overlapping_groups": 0,
-            "ambiguous_groups": 0,
-            "pruned_services": 0,
-            "kept_services": 0,
-        },
-    }
-
-    print(f"  - Found {len(groups)} route-aware weekday-mask groups")
-
+    groups: Dict[Tuple[bool,bool,bool,bool,bool,bool,bool], List[str]] = defaultdict(list)
+    for cal in calendar_rows:
+        groups[_weekday_mask(cal)].append(cal["service_id"])
     services_to_keep: Set[str] = set()
     services_to_prune: Set[str] = set()
-    for (mask, route_ids), service_ids in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1])):
+    for mask, service_ids in groups.items():
         active_day_count = sum(1 for f in mask if f)
-        route_label = ",".join(route_ids)
         if len(service_ids) <= 1:
             services_to_keep.update(service_ids)
-            diagnostics["summary"]["kept_services"] += len(service_ids)
             continue
-
-        diagnostics["summary"]["overlapping_groups"] += 1
-
         if active_day_count <= 2:
             services_to_keep.update(service_ids)
-            diagnostics["summary"]["ambiguous_groups"] += 1
-            diagnostics["summary"]["kept_services"] += len(service_ids)
-            diagnostics["groups"].append({
-                "weekday_mask": str(mask),
-                "route_ids": list(route_ids),
-                "service_ids": service_ids,
-                "winner": None,
-                "reasons": [
-                    f"Weekday mask has {active_day_count} active day(s); keeping all services",
-                    f"Routes: {route_label}",
-                ],
-                "is_ambiguous": True,
-            })
-            print(
-                f"    - Limited-day group {mask} routes [{route_label}]: keeping all {len(service_ids)} services"
-            )
             continue
-
-        winner, reasons, is_ambiguous = _choose_service_winner_factual(
+        winner, _reasons, is_ambiguous = _choose_service_winner_factual(
             service_ids, calendars_dict, calendar_dates, pivot, overlap_max_days
         )
-
-        diagnostics["groups"].append({
-            "weekday_mask": str(mask),
-            "route_ids": list(route_ids),
-            "service_ids": service_ids,
-            "winner": winner,
-            "reasons": reasons,
-            "is_ambiguous": is_ambiguous,
-        })
-
         if is_ambiguous or not winner:
             services_to_keep.update(service_ids)
-            diagnostics["summary"]["ambiguous_groups"] += 1
-            diagnostics["summary"]["kept_services"] += len(service_ids)
-            print(
-                f"    - Ambiguous group {mask} routes [{route_label}]: keeping all {len(service_ids)} services"
-            )
         else:
             services_to_keep.add(winner)
-            pruned = [s for s in service_ids if s != winner]
-            services_to_prune.update(pruned)
-            diagnostics["summary"]["pruned_services"] += len(pruned)
-            diagnostics["summary"]["kept_services"] += 1
-            print(
-                f"    - Group {mask} routes [{route_label}]: keeping {winner}, pruning {len(pruned)} services"
-            )
-
+            services_to_prune.update(s for s in service_ids if s != winner)
     cal_f = [c for c in calendar_rows   if c["service_id"] in services_to_keep]
     cd_f  = [d for d in calendar_dates  if d["service_id"] in services_to_keep]
     kept_trip_ids: Set[str] = set()
@@ -328,7 +244,7 @@ def _prune_overlaps_factual(
     print("Pruning summary:")
     print(f"  services kept: {len(services_to_keep)}   pruned: {len(services_to_prune)}")
     print(f"  trips: {len(trips)} → {len(trips_f)}   stop_times: {len(stop_times)} → {len(stop_times_f)}")
-    return cal_f, cd_f, trips_f, stop_times_f, diagnostics
+    return cal_f, cd_f, trips_f, stop_times_f
 def build(gtfs_url: str, out_dir: Path, target_date: Optional[date], window_days: int,
           prune_mode: str, overlap_max_days: int) -> None:
     tmp = out_dir.parent / ".tmp"
@@ -399,10 +315,9 @@ def build(gtfs_url: str, out_dir: Path, target_date: Optional[date], window_days
         for day in ("monday","tuesday","wednesday","thursday","friday","saturday","sunday"):
             row[day] = (row.get(day,"0") == "1")
         calendar_typed.append(row)
-    diagnostics = None
     if prune_mode == "factual":
         print("Applying overlap pruning (factual mode)...")
-        cal_filtered, cd_filtered, trips_filtered, stop_times_filtered, diagnostics = _prune_overlaps_factual(
+        cal_filtered, cd_filtered, trips_filtered, stop_times_filtered = _prune_overlaps_factual(
             agencies=agencies,
             calendar_rows=calendar_rows,  
             calendar_dates=calendar_dates,
