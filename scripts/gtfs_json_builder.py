@@ -360,12 +360,11 @@ def build(gtfs_url: str, out_dir: Path, target_date: Optional[date], window_days
         target_date = today
     else:
         today = target_date
-    version = None
-    if feed_info:
-        v = (feed_info[0].get("feed_version") or "").strip()
-        version = v or None
+    version = os.environ.get("GTFS_OUTPUT_VERSION", "").strip()
+    if not version and feed_info:
+        version = (feed_info[0].get("feed_version") or "").strip()
     if not version:
-        version = datetime.utcnow().strftime("%Y%m%d")
+        version = "test12345678"
     stops_typed = []
     for s in stops:
         stops_typed.append({
