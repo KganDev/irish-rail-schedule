@@ -360,7 +360,13 @@ def build(gtfs_url: str, out_dir: Path, target_date: Optional[date], window_days
         target_date = today
     else:
         today = target_date
-    version = os.environ.get("GTFS_OUTPUT_VERSION", "test12345678").strip()
+    raw_version = None
+    if feed_info:
+        candidate = (feed_info[0].get("feed_version") or "").strip()
+        raw_version = candidate or None
+    if not raw_version:
+        raw_version = datetime.utcnow().strftime("%Y%m%d")
+    version = f"kg-{raw_version}"
     stops_typed = []
     for s in stops:
         stops_typed.append({
@@ -418,13 +424,20 @@ def build(gtfs_url: str, out_dir: Path, target_date: Optional[date], window_days
         stop_times_typed = stop_times_filtered
     else:
         print("Skipping overlap pruning (mode: off)")
+    feed_version_meta = None
+    if feed_info:
+        raw_feed_version = (feed_info[0].get("feed_version") or "").strip()
+        feed_version_meta = raw_feed_version or None
+    if not feed_version_meta:
+        feed_version_meta = raw_version
+
     wins = _effective_windows(today, window_days, calendar_rows, calendar_dates)
     windows_json = {
         "generatedAt": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "scan": {"from": _date_to_yyyymmdd(today),
                  "to": _date_to_yyyymmdd(today + timedelta(days=window_days))},
         "feed": {
-            "version": version,
+            "version": feed_version_meta,
             "startDate": (feed_info[0].get("feed_start_date") if feed_info else None),
             "endDate":   (feed_info[0].get("feed_end_date")   if feed_info else None),
         },
