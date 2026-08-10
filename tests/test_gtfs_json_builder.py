@@ -152,6 +152,24 @@ class GtfsJsonBuilderTest(unittest.TestCase):
                 )
             self.assertFalse((output / "latest.json").exists())
 
+    def test_newer_subset_cannot_delete_broader_service(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "subset.zip"
+            output = temp / "out"
+            self._write_overlap_fixture(source, extra_old_trips=79)
+
+            with self.assertRaises(builder.FeedValidationError):
+                builder.build(
+                    source.as_uri(),
+                    output,
+                    date(2026, 8, 10),
+                    2,
+                    minimum_trips=1,
+                    minimum_stop_times=2,
+                )
+            self.assertFalse((output / "latest.json").exists())
+
     def _write_fixture(self, path):
         files = {
             "agency.txt": self._csv(
@@ -234,7 +252,7 @@ class GtfsJsonBuilderTest(unittest.TestCase):
             for name, contents in files.items():
                 archive.writestr(name, contents)
 
-    def _write_overlap_fixture(self, path, *, compatible=True):
+    def _write_overlap_fixture(self, path, *, compatible=True, extra_old_trips=0):
         trips = []
         stop_times = []
         for index in range(20):
@@ -274,6 +292,15 @@ class GtfsJsonBuilderTest(unittest.TestCase):
                 ["new-only", "13:30:00", "13:30:00", "CITY", "2"],
             ]
         )
+        for index in range(extra_old_trips):
+            trip_id = f"old-extra-{index}"
+            trips.append(["DART", "old", trip_id, f"X{index:03d}", "1"])
+            stop_times.extend(
+                [
+                    [trip_id, "14:00:00", "14:00:00", "HOWTH", "1"],
+                    [trip_id, "14:30:00", "14:30:00", "CITY", "2"],
+                ]
+            )
         files = {
             "agency.txt": self._csv(
                 ["agency_id", "agency_name", "agency_url", "agency_timezone"],

@@ -173,6 +173,8 @@ def _trip_profiles(
 def _compatible_trip(left: Mapping, right: Mapping) -> bool:
     left_departure = left.get("departure")
     right_departure = right.get("departure")
+    # The 2025 bad feed moved E201 by three minutes and added Woodbrook; across
+    # the proven old/new revision, 515 of 517 shared trains stayed within 10 min.
     return (
         left_departure is not None
         and right_departure is not None
@@ -190,7 +192,13 @@ def _sanitize_revision_overlaps(
     similarity_min: float,
     minimum_shared_trips: int,
 ) -> Tuple[List[Dict], List[Dict]]:
-    """Suppress only proven stale timetable revisions on their overlapping dates."""
+    """Suppress only proven stale timetable revisions on their overlapping dates.
+
+    This is deliberately stricter than GTFS validation. It models the actual 2025
+    Irish Rail failure: two near-complete weekday timetables overlapped for 43
+    service dates. Partial route patches and disjoint timetable periods are never
+    selected as whole-feed replacements.
+    """
 
     calendars = {_text(row, "service_id"): row for row in calendar_rows}
     active = _active_dates(calendar_rows, calendar_dates)
@@ -223,7 +231,10 @@ def _sanitize_revision_overlaps(
                 for key in common
                 if _compatible_trip(left_profiles[key], right_profiles[key])
             )
-            denominator = min(len(left_profiles), len(right_profiles))
+            # Score against the larger timetable. Using the smaller one would make a
+            # route-sized patch look like a complete replacement and could delete the
+            # rest of the broader service.
+            denominator = max(len(left_profiles), len(right_profiles))
             similarity = compatible / denominator if denominator else 0.0
             if compatible < minimum_shared_trips:
                 continue
