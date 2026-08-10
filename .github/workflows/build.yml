@@ -20,17 +20,56 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Test builder
-        run: python -m unittest discover -s tests
+        run: python -m unittest discover -s tests -v
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Build JSON
+      - name: Download GTFS once
         env:
           GTFS_URL: https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip
+        run: curl -fsSL "$GTFS_URL" -o "$RUNNER_TEMP/GTFS_Irish_Rail.zip"
+
+      - name: Validate source GTFS
+        run: |
+          set -euo pipefail
+          JAR="$RUNNER_TEMP/gtfs-validator-8.0.1-cli.jar"
+          REPORT="$RUNNER_TEMP/gtfs-validator-report"
+          curl -fsSL "https://github.com/MobilityData/gtfs-validator/releases/download/v8.0.1/gtfs-validator-8.0.1-cli.jar" -o "$JAR"
+          echo "19293ddd9b6f954f216d4f12054bd8a3232921751c4484339e339764a91000e2  $JAR" | sha256sum -c -
+          mkdir -p "$REPORT"
+          java -jar "$JAR" \
+            --input "$RUNNER_TEMP/GTFS_Irish_Rail.zip" \
+            --output_base "$REPORT" \
+            --country_code IE \
+            --skip_validator_update
+          jq -e '[.notices[]? | select(.severity == "ERROR")] | length == 0' "$REPORT/report.json"
+          jq -e '(.notices // []) | length == 0' "$REPORT/system_errors.json"
+
+      - name: Upload GTFS validation report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gtfs-validation-report
+          path: ${{ runner.temp }}/gtfs-validator-report/
+          if-no-files-found: warn
+
+      - name: Build JSON
+        env:
+          GTFS_URL: file://${{ runner.temp }}/GTFS_Irish_Rail.zip
           OUT_DIR: out
           WINDOW_DAYS: "90"
+          MIN_TRIPS: "1000"
+          MIN_STOP_TIMES: "10000"
+          REVISION_SIMILARITY: "0.90"
+          REVISION_MIN_SHARED_TRIPS: "20"
         run: python scripts/gtfs_json_builder.py
 
       - name: Upload artifact
@@ -115,5 +154,5 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS "https://${PUBLIC_HOST}/latest.json" | jq .
-          V=$(curl -fsS "https://${PUBLIC_HOST}/latest.json" | jq -r '.latest')
+          V="${{ steps.ver.outputs.version }}"
           curl -fsS "https://${PUBLIC_HOST}/gtfs/${V}/stops.json" | jq '.[0]'
