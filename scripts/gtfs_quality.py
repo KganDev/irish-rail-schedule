@@ -24,6 +24,8 @@ WEEKDAYS = (
 )
 SAFE_VERSION = re.compile(r"^[A-Za-z0-9-]+$")
 GTFS_TIME = re.compile(r"^(\d{1,2}):([0-5]\d):([0-5]\d)$")
+DEFAULT_MIN_COVERAGE_DAYS = 7
+DEFAULT_COVERAGE_WARNING_DAYS = 30
 
 
 class FeedValidationError(ValueError):
@@ -38,6 +40,7 @@ class QualityResult:
     calendar_dates: List[Dict]
     service_start: date
     service_end: date
+    scan_end: date
     diagnostics: Dict
 
 
@@ -306,8 +309,31 @@ def validate_and_sanitize(
     minimum_stop_times: int,
     similarity_min: float = 0.9,
     minimum_shared_trips: int = 20,
+    minimum_coverage_days: int = DEFAULT_MIN_COVERAGE_DAYS,
+    coverage_warning_days: int = DEFAULT_COVERAGE_WARNING_DAYS,
 ) -> QualityResult:
     errors: List[str] = []
+    for name, value, minimum in (
+        ("WINDOW_DAYS", window_days, 0),
+        ("MIN_COVERAGE_DAYS", minimum_coverage_days, 1),
+        ("COVERAGE_WARNING_DAYS", coverage_warning_days, 1),
+    ):
+        if type(value) is not int or value < minimum:
+            errors.append(f"{name} must be an integer of at least {minimum}")
+    if errors:
+        raise FeedValidationError(errors)
+    if coverage_warning_days < minimum_coverage_days:
+        raise FeedValidationError(
+            ["COVERAGE_WARNING_DAYS must be at least MIN_COVERAGE_DAYS"]
+        )
+    try:
+        requested_end = target_date + timedelta(days=window_days)
+        minimum_end = target_date + timedelta(days=minimum_coverage_days)
+    except OverflowError as error:
+        raise FeedValidationError(
+            ["coverage settings exceed the supported date range"]
+        ) from error
+
     required = {
         "agency.txt": ("agency_name", "agency_url", "agency_timezone"),
         "stops.txt": ("stop_id", "stop_name", "stop_lat", "stop_lon"),
@@ -502,15 +528,20 @@ def validate_and_sanitize(
     if not all_dates:
         raise FeedValidationError(["feed has no effective passenger service dates"])
     service_start, service_end = min(all_dates), max(all_dates)
-    required_end = target_date + timedelta(days=window_days)
     if not service_start <= target_date <= service_end:
         raise FeedValidationError(
             [f"target date {target_date} is outside effective service {service_start}..{service_end}"]
         )
-    if service_end < required_end:
+    # The scan is a desired lookahead, not a promise the upstream feed can make.
+    # Keep a separate publication minimum based on actual trip-bearing services.
+    if service_end < minimum_end:
         raise FeedValidationError(
-            [f"effective service ends {service_end}, before required horizon {required_end}"]
+            [
+                f"effective service ends {service_end}, before minimum coverage date "
+                f"{minimum_end} ({minimum_coverage_days} days ahead)"
+            ]
         )
+    scan_end = min(requested_end, service_end)
 
     # A train number may occur only once per service date after revision sanitation.
     trips_by_service: Dict[str, List[Mapping]] = defaultdict(list)
@@ -543,6 +574,13 @@ def validate_and_sanitize(
 
     source_start = _parse_date(_text(feed_info[0], "feed_start_date")) if feed_info else None
     source_end = _parse_date(_text(feed_info[0], "feed_end_date")) if feed_info else None
+    days_remaining = (service_end - target_date).days
+    warnings = []
+    if days_remaining < coverage_warning_days:
+        warnings.append(
+            f"effective service ends {service_end}, only {days_remaining} days ahead "
+            f"(warning threshold: {coverage_warning_days} days)"
+        )
     diagnostics = {
         "qualityGate": "passed",
         "sourceCounts": {
@@ -562,5 +600,16 @@ def validate_and_sanitize(
         },
         "sourceWindowMatchesService": source_start == service_start and source_end == service_end,
         "revisionActions": revision_actions,
+        "coverage": {
+            "targetDate": _format_date(target_date),
+            "minimumDays": minimum_coverage_days,
+            "warningDays": coverage_warning_days,
+            "requiredThrough": _format_date(minimum_end),
+            "daysRemaining": days_remaining,
+            "requestedScanThrough": _format_date(requested_end),
+            "scanThrough": _format_date(scan_end),
+            "scanTruncated": scan_end < requested_end,
+        },
+        "warnings": warnings,
     }
-    return QualityResult(sanitized_dates, service_start, service_end, diagnostics)
+    return QualityResult(sanitized_dates, service_start, service_end, scan_end, diagnostics)

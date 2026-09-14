@@ -10,14 +10,19 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta, date, timezone
 from typing import Dict, List, Tuple, Optional, Set
-from gtfs_quality import FeedValidationError, validate_and_sanitize
+from gtfs_quality import (
+    DEFAULT_COVERAGE_WARNING_DAYS,
+    DEFAULT_MIN_COVERAGE_DAYS,
+    FeedValidationError,
+    validate_and_sanitize,
+)
 try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
 GTFS_URL_DEFAULT = "https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip"
 def _yyyymmdd_to_date(s: str) -> Optional[date]:
-    if not s or len(s) != 8:
+    if not s or len(s) != 8 or not s.isdigit():
         return None
     try:
         return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
@@ -72,7 +77,8 @@ def _active_services_on(D: date, calendar_rows: List[Dict], calendar_dates_rows:
             elif t == "2": active.discard(sid)
     return active
 def _effective_windows(start: date, days: int, cal: List[Dict], cd: List[Dict]) -> List[Tuple[date, date]]:
-    if days <= 0: return []
+    if days < 0:
+        raise ValueError("scan days must not be negative")
     def sig(sids: Set[str]) -> Tuple[int, int]:
         if not sids: return (0,0)
         payload = "|".join(sorted(sids)).encode()
@@ -101,6 +107,8 @@ def build(
     minimum_stop_times: int = 10000,
     revision_similarity: float = 0.9,
     revision_min_shared_trips: int = 20,
+    minimum_coverage_days: int = DEFAULT_MIN_COVERAGE_DAYS,
+    coverage_warning_days: int = DEFAULT_COVERAGE_WARNING_DAYS,
 ) -> None:
     tmp = out_dir.parent / ".tmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -150,6 +158,8 @@ def build(
         minimum_stop_times=minimum_stop_times,
         similarity_min=revision_similarity,
         minimum_shared_trips=revision_min_shared_trips,
+        minimum_coverage_days=minimum_coverage_days,
+        coverage_warning_days=coverage_warning_days,
     )
     calendar_dates = quality.calendar_dates
     raw_version = (feed_info[0].get("feed_version") or "").strip()
@@ -190,11 +200,12 @@ def build(
         calendar_typed.append(row)
     feed_version_meta = raw_version
 
-    wins = _effective_windows(today, window_days, calendar_rows, calendar_dates)
+    scan_days = (quality.scan_end - today).days
+    wins = _effective_windows(today, scan_days, calendar_rows, calendar_dates)
     windows_json = {
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "scan": {"from": _date_to_yyyymmdd(today),
-                 "to": _date_to_yyyymmdd(today + timedelta(days=window_days))},
+                 "to": _date_to_yyyymmdd(quality.scan_end)},
         "feed": {
             "version": feed_version_meta,
             "startDate": _date_to_yyyymmdd(quality.service_start),
@@ -243,18 +254,33 @@ def build(
     print(f"  stop_times: {len(stop_times_typed)}")
     print(f"  calendar rows: {len(calendar_rows)}  calendar_dates: {len(calendar_dates)}")
     print(f"  overlapping timetable revisions sanitized: {len(quality.diagnostics['revisionActions'])}")
+    print(f"  effective service ends: {quality.service_end}")
+    print(f"  scan: {today} to {quality.scan_end}")
+    if quality.diagnostics["coverage"]["scanTruncated"]:
+        print("  scan limited to the available service dates")
+    for warning in quality.diagnostics["warnings"]:
+        prefix = "::warning::" if os.environ.get("GITHUB_ACTIONS") == "true" else "Warning: "
+        print(f"{prefix}{warning}")
     if len(wins) > 1:
         print(f"  next timetable change: {_date_to_yyyymmdd(wins[1][0])}")
 if __name__ == "__main__":
-    gtfs_url    = os.environ.get("GTFS_URL", GTFS_URL_DEFAULT)
-    out_dir     = Path(os.environ.get("OUT_DIR", "out"))
-    window_days = int(os.environ.get("WINDOW_DAYS", "90") or "90")
-    minimum_trips = int(os.environ.get("MIN_TRIPS", "1000") or "1000")
-    minimum_stop_times = int(os.environ.get("MIN_STOP_TIMES", "10000") or "10000")
-    revision_similarity = float(os.environ.get("REVISION_SIMILARITY", "0.9") or "0.9")
-    revision_min_shared = int(os.environ.get("REVISION_MIN_SHARED_TRIPS", "20") or "20")
-    tgt         = os.environ.get("TARGET_DATE")
-    target_date = _yyyymmdd_to_date(tgt) if tgt else None
+    try:
+        gtfs_url    = os.environ.get("GTFS_URL", GTFS_URL_DEFAULT)
+        out_dir     = Path(os.environ.get("OUT_DIR", "out"))
+        window_days = int(os.environ.get("WINDOW_DAYS", "90") or "90")
+        minimum_trips = int(os.environ.get("MIN_TRIPS", "1000") or "1000")
+        minimum_stop_times = int(os.environ.get("MIN_STOP_TIMES", "10000") or "10000")
+        revision_similarity = float(os.environ.get("REVISION_SIMILARITY", "0.9") or "0.9")
+        revision_min_shared = int(os.environ.get("REVISION_MIN_SHARED_TRIPS", "20") or "20")
+        minimum_coverage_days = int(os.environ.get("MIN_COVERAGE_DAYS") or DEFAULT_MIN_COVERAGE_DAYS)
+        coverage_warning_days = int(os.environ.get("COVERAGE_WARNING_DAYS") or DEFAULT_COVERAGE_WARNING_DAYS)
+        tgt = os.environ.get("TARGET_DATE")
+        target_date = _yyyymmdd_to_date(tgt) if tgt else None
+        if tgt and target_date is None:
+            raise ValueError("TARGET_DATE must be a valid date in YYYYMMDD format")
+    except ValueError as error:
+        print(f"Invalid builder configuration: {error}", file=sys.stderr)
+        sys.exit(1)
     try:
         build(
             gtfs_url,
@@ -265,6 +291,8 @@ if __name__ == "__main__":
             minimum_stop_times=minimum_stop_times,
             revision_similarity=revision_similarity,
             revision_min_shared_trips=revision_min_shared,
+            minimum_coverage_days=minimum_coverage_days,
+            coverage_warning_days=coverage_warning_days,
         )
     except FeedValidationError as error:
         print(error, file=sys.stderr)
