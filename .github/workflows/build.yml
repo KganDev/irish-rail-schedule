@@ -1,10 +1,23 @@
 name: Build GTFS JSON
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build.yml
+      - scripts/gtfs_json_builder.py
+      - scripts/gtfs_quality.py
+      - src/**
   schedule:
     - cron: "15 2 * * *"
   workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: gtfs-publish
+  cancel-in-progress: false
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -66,6 +79,8 @@ jobs:
           GTFS_URL: file://${{ runner.temp }}/GTFS_Irish_Rail.zip
           OUT_DIR: out
           WINDOW_DAYS: "90"
+          MIN_COVERAGE_DAYS: "7"
+          COVERAGE_WARNING_DAYS: "30"
           MIN_TRIPS: "1000"
           MIN_STOP_TIMES: "10000"
           REVISION_SIMILARITY: "0.90"

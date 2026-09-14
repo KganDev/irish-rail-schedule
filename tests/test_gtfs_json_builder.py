@@ -1,11 +1,14 @@
 import csv
+import contextlib
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -16,6 +19,230 @@ import gtfs_json_builder as builder
 
 
 class GtfsJsonBuilderTest(unittest.TestCase):
+    def test_feed_remains_publishable_after_crossing_the_scan_horizon(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip")
+            for target, truncated in (
+                (date(2026, 9, 13), False),
+                (date(2026, 9, 14), True),
+                (date(2026, 9, 15), True),
+            ):
+                with self.subTest(target=target):
+                    windows, status, log = self._build_coverage(temp, target_date=target)
+                    self.assertEqual(windows["scan"], {"from": target.strftime("%Y%m%d"), "to": "20261212"})
+                    self.assertEqual(windows["feed"]["endDate"], "20261212")
+                    self.assertEqual(windows["feed"]["sourceEndDate"], "20270913")
+                    self.assertEqual(windows["windows"][-1]["to"], "20261212")
+                    self.assertTrue(all(window["from"] <= window["to"] <= "20261212" for window in windows["windows"]))
+                    self.assertTrue(status["ok"])
+                    self.assertEqual(status["validation"]["coverage"]["scanTruncated"], truncated)
+                    self.assertEqual(status["validation"]["warnings"], [])
+                    if truncated:
+                        self.assertIn("scan limited to the available service dates", log)
+
+    def test_full_feed_keeps_the_requested_scan_and_all_future_trips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip", end="20261231")
+            windows, status, _ = self._build_coverage(temp)
+            self.assertEqual(windows["scan"]["to"], "20261213")
+            self.assertEqual(windows["windows"][-1]["to"], "20261213")
+            self.assertFalse(status["validation"]["coverage"]["scanTruncated"])
+            version_dir = temp / "out" / "gtfs" / status["latest"]
+            self.assertEqual(len(json.loads((version_dir / "trips.json").read_text())), 2)
+            self.assertTrue(all(row["end_date"] == "20261231" for row in json.loads((version_dir / "calendar.json").read_text())))
+
+    def test_coverage_warning_and_minimum_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip")
+            for days, warned in ((30, False), (29, True), (7, True)):
+                with self.subTest(days=days):
+                    target = date(2026, 12, 12) - timedelta(days=days)
+                    windows, status, log = self._build_coverage(temp, target_date=target)
+                    coverage = status["validation"]["coverage"]
+                    self.assertEqual(coverage["daysRemaining"], days)
+                    self.assertEqual(coverage["requiredThrough"], (target + timedelta(days=7)).strftime("%Y%m%d"))
+                    self.assertEqual(coverage["scanThrough"], windows["scan"]["to"])
+                    self.assertEqual(bool(status["validation"]["warnings"]), warned)
+                    if warned:
+                        self.assertIn(f"only {days} days ahead", log)
+
+    def test_rejected_coverage_preserves_every_existing_output_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip")
+            self._build_coverage(temp)
+            output = temp / "out"
+            before = {p.relative_to(output): p.read_bytes() for p in output.rglob("*") if p.is_file()}
+            for target, expected in (
+                (date(2026, 12, 6), "before minimum coverage date"),
+                (date(2026, 12, 12), "before minimum coverage date"),
+                (date(2026, 12, 13), "outside effective service"),
+                (date(2026, 8, 31), "outside effective service"),
+            ):
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(builder.FeedValidationError, expected):
+                        self._build_coverage(temp, target_date=target)
+                    after = {p.relative_to(output): p.read_bytes() for p in output.rglob("*") if p.is_file()}
+                    self.assertEqual(before, after)
+
+    def test_scan_length_cannot_bypass_minimum_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip", end="20260920")
+            with self.assertRaisesRegex(builder.FeedValidationError, "2026-09-21"):
+                self._build_coverage(temp, window_days=2)
+            self.assertFalse((temp / "out").exists())
+
+    def test_custom_minimum_is_honoured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip")
+            with self.assertRaisesRegex(builder.FeedValidationError, "90 days ahead"):
+                self._build_coverage(temp, minimum_coverage_days=90, coverage_warning_days=90)
+
+    def test_zero_day_scan_includes_the_target_date(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip")
+            windows, _, _ = self._build_coverage(temp, window_days=0)
+            self.assertEqual(windows["scan"], {"from": "20260914", "to": "20260914"})
+            self.assertEqual(windows["windows"], [{"from": "20260914", "to": "20260914"}])
+
+    def test_calendar_exceptions_determine_the_actual_service_end(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            additions = [(service, "20260921", "1") for service in ("current", "future")]
+            self._write_coverage_fixture(temp / "coverage.zip", end="20260920", exceptions=additions)
+            windows, _, _ = self._build_coverage(temp)
+            self.assertEqual(windows["scan"]["to"], "20260921")
+
+            removals = [(service, "20260921", "2") for service in ("current", "future")]
+            self._write_coverage_fixture(temp / "coverage.zip", end="20260921", exceptions=removals)
+            with self.assertRaisesRegex(builder.FeedValidationError, "effective service ends 2026-09-20"):
+                self._build_coverage(temp)
+
+    def test_unused_calendar_cannot_extend_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip", end="20260920", unused_end="20270913")
+            with self.assertRaisesRegex(builder.FeedValidationError, "effective service ends 2026-09-20"):
+                self._build_coverage(temp)
+
+    def test_calendar_dates_only_feed_is_supported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            exceptions = [
+                (service, (date(2026, 9, 14) + timedelta(days=offset)).strftime("%Y%m%d"), "1")
+                for service in ("current", "future") for offset in range(8)
+            ]
+            self._write_coverage_fixture(temp / "coverage.zip", exceptions=exceptions, exceptions_only=True)
+            windows, status, _ = self._build_coverage(temp)
+            self.assertEqual(windows["scan"]["to"], "20260921")
+            self.assertEqual(status["validation"]["coverage"]["daysRemaining"], 7)
+
+    def test_explicit_no_service_day_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            exceptions = [(service, "20260915", "2") for service in ("current", "future")]
+            self._write_coverage_fixture(temp / "coverage.zip", exceptions=exceptions)
+            windows, status, _ = self._build_coverage(temp)
+            self.assertIn({"from": "20260915", "to": "20260915"}, windows["windows"])
+            path = temp / "out" / "gtfs" / status["latest"] / "calendar_dates.json"
+            self.assertEqual(json.loads(path.read_text()), [
+                {"service_id": service, "date": "20260915", "exception_type": "2"}
+                for service in ("current", "future")
+            ])
+
+    def test_invalid_coverage_settings_fail_before_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            self._write_coverage_fixture(temp / "coverage.zip")
+            for options in (
+                {"window_days": -1},
+                {"window_days": 1.5},
+                {"window_days": True},
+                {"window_days": 10**20},
+                {"minimum_coverage_days": 0},
+                {"minimum_coverage_days": -1},
+                {"coverage_warning_days": 6},
+            ):
+                with self.subTest(options=options):
+                    with self.assertRaises(builder.FeedValidationError):
+                        self._build_coverage(temp, **options)
+                    self.assertFalse((temp / "out").exists())
+
+    def test_cli_coverage_settings_and_warning_annotation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "coverage.zip"
+            self._write_coverage_fixture(source, end="20261004")
+            environment = {
+                **os.environ,
+                "GTFS_URL": source.as_uri(), "OUT_DIR": str(temp / "out"),
+                "TARGET_DATE": "20260914", "WINDOW_DAYS": "90",
+                "MIN_COVERAGE_DAYS": "14", "COVERAGE_WARNING_DAYS": "21",
+                "MIN_TRIPS": "1", "MIN_STOP_TIMES": "2",
+                "REVISION_SIMILARITY": "0.9", "REVISION_MIN_SHARED_TRIPS": "20",
+                "GITHUB_ACTIONS": "true",
+            }
+            command = [sys.executable, str(ROOT / "scripts" / "gtfs_json_builder.py")]
+            result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("::warning::effective service ends 2026-10-04, only 20 days ahead", result.stdout)
+            status = json.loads((temp / "out" / "status.json").read_text())
+            self.assertEqual(status["validation"]["coverage"]["minimumDays"], 14)
+            self.assertEqual(status["validation"]["coverage"]["warningDays"], 21)
+            before = (temp / "out" / "latest.json").read_bytes()
+            for invalid in (
+                {"TARGET_DATE": "20260931"},
+                {"TARGET_DATE": "202609 1"},
+                {"WINDOW_DAYS": "invalid"},
+            ):
+                with self.subTest(invalid=invalid):
+                    result = subprocess.run(command, env={**environment, **invalid}, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("Invalid builder configuration:", result.stderr)
+                    self.assertEqual((temp / "out" / "latest.json").read_bytes(), before)
+
+    def _build_coverage(self, temp, *, target_date=date(2026, 9, 14), window_days=90, **options):
+        output = temp / "out"
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            builder.build(
+                (temp / "coverage.zip").as_uri(), output, target_date, window_days,
+                minimum_trips=1, minimum_stop_times=2, **options,
+            )
+        return (
+            json.loads((output / "windows.json").read_text()),
+            json.loads((output / "status.json").read_text()),
+            log.getvalue(),
+        )
+
+    def _write_coverage_fixture(self, path, *, end="20261212", exceptions=(), unused_end=None, exceptions_only=False):
+        self._write_fixture(path)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name).decode() for name in archive.namelist()}
+        files["feed_info.txt"] = self._csv(
+            ["feed_start_date", "feed_end_date", "feed_version"],
+            [["20260901", "20270913", "coverage-1"]],
+        )
+        calendars = [[service, *(["1"] * 7), "20260901", end] for service in ("current", "future")]
+        if unused_end:
+            calendars.append(["unused", *(["1"] * 7), "20260901", unused_end])
+        files["calendar.txt"] = self._csv(
+            ["service_id", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "start_date", "end_date"],
+            calendars,
+        )
+        if exceptions_only:
+            del files["calendar.txt"]
+        files["calendar_dates.txt"] = self._csv(["service_id", "date", "exception_type"], exceptions)
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, contents in files.items():
+                archive.writestr(name, contents)
+
     def test_build_preserves_disjoint_service_periods(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
