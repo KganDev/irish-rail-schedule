@@ -45,11 +45,46 @@ build. Check Actions for the latest attempt's result.
 ```sh
 python -m unittest discover -s tests -v
 python scripts/gtfs_json_builder.py
+python scripts/bus_json_builder.py
 node --test tests/live.test.ts
 ```
 
 The builder writes to `out/` by default and does not publish from a local run.
 Tests use local fixtures and run on pull requests without deployment credentials.
+
+## Dublin Bus timetable (test)
+
+The Dublin Bus feed has close to four million stop times, too many for an app to
+download whole. `scripts/bus_json_builder.py` groups neighbouring stops into shards of
+eight, so an app fetches only the shards for the stops it shows.
+
+| Path | Contents |
+| --- | --- |
+| `/bus/latest.json` | The current version and its shard count. |
+| `/bus/status.json` | Counts and service dates of the last successful build. |
+| `/bus/<version>/stops.json` | Every stop: id, stop number, name, position, routes, and its shard. |
+| `/bus/<version>/routes.json` | Route numbers and descriptions. |
+| `/bus/<version>/calendar.json` | Which days each service runs, with added and removed dates. |
+| `/bus/<version>/shards/<shard>.json` | Departures for each stop in the shard. |
+
+A shard lists its `routes`, `headsigns` and `services` once. Each departure is
+`[seconds after midnight, trip_id, stop_sequence, route, headsign, service]`, where the
+last three are positions in those lists. Times past midnight run over 86400 and belong
+to the service day they started on. Stops where a trip only lets passengers off are
+left out. `trip_id` and `stop_sequence` match the live feed below.
+
+Versioned files are stored gzipped in R2 and sent as stored. Feeds with missing
+columns, unknown trips or stops, unreadable times, too few rows, or fewer than
+`MIN_COVERAGE_DAYS` of service left are rejected before anything is written.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `STOPS_PER_SHARD` | `8` | Stops grouped into one file. |
+| `MIN_BUS_STOPS` | `1000` | Fewest stops a publishable feed may have. |
+| `MIN_BUS_TRIPS` | `10000` | Fewest trips. |
+| `MIN_BUS_DEPARTURES` | `1000000` | Fewest departures. |
+
+Pushing to `big-test` builds and uploads it under `bus/` in the bucket.
 
 ## Live Dublin Bus feed (test)
 

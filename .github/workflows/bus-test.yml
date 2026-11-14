@@ -1,0 +1,68 @@
+name: Publish bus timetable test
+# Builds the Dublin Bus timetable and uploads it under bus/ in the bucket, where the
+# test Worker serves it. Nothing the production Worker serves is changed.
+on:
+  push:
+    branches: [big-test]
+    paths:
+      - .github/workflows/bus-test.yml
+      - scripts/bus_json_builder.py
+      - scripts/bus_upload_list.py
+      - scripts/gtfs_json_builder.py
+      - scripts/gtfs_quality.py
+permissions:
+  contents: read
+concurrency:
+  group: bus-test
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Test builder
+        run: python -m unittest discover -s tests -v
+
+      - name: Build JSON
+        env:
+          OUT_DIR: out
+        run: python scripts/bus_json_builder.py
+
+      - name: Read version
+        id: ver
+        run: echo "version=$(jq -r '.latest' out/bus/latest.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Pack for upload
+        run: python scripts/bus_upload_list.py "out/bus/${{ steps.ver.outputs.version }}" "$RUNNER_TEMP/bus-staging" "$RUNNER_TEMP/bus-upload.json"
+
+      - name: Install Wrangler
+        run: npm i -g wrangler@4
+
+      - name: Upload versioned JSON to R2
+        run: |
+          wrangler r2 bulk put "$R2_BUCKET" --remote --filename "$RUNNER_TEMP/bus-upload.json" \
+            --content-type "application/json" --content-encoding gzip \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Check upload
+        run: |
+          set -euo pipefail
+          wrangler r2 object get --remote "${R2_BUCKET}/bus/${{ steps.ver.outputs.version }}/stops.json" --file "$RUNNER_TEMP/stops.json.gz"
+          gzip -dc "$RUNNER_TEMP/stops.json.gz" | jq -e 'length > 0' > /dev/null
+
+      # The pointers go last, so latest.json never names files that are not there yet.
+      - name: Upload pointers to R2
+        run: |
+          wrangler r2 object put --remote "${R2_BUCKET}/bus/latest.json" --file out/bus/latest.json --cache-control "public, max-age=60" --content-type "application/json"
+          wrangler r2 object put --remote "${R2_BUCKET}/bus/status.json" --file out/bus/status.json --cache-control "public, max-age=30" --content-type "application/json"

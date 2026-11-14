@@ -25,6 +25,8 @@ const JSON_FILES = new Set([
   "agencies.json"
 ])
 
+const BUS_FILES = new Set(["stops.json", "routes.json", "calendar.json"])
+
 function cors(h = new Headers()) {
   h.set("Access-Control-Allow-Origin", "*")
   h.set("Vary", "Origin")
@@ -73,6 +75,25 @@ async function serveR2Object(
   return res
 }
 
+// Bus timetable files are stored gzipped and sent exactly as stored. They skip the edge
+// cache above: a gzipped body read back from it was gzipped a second time when tested
+// locally. Each version is immutable, so apps keep their own copy.
+async function serveGzippedObject(request: Request, env: Env, key: string): Promise<Response> {
+  const obj = await env.GTFS.get(key)
+  if (!obj) {
+    return new Response(JSON.stringify({ error: "not found", key }), { status: 404, headers: withCommon(cors()) })
+  }
+  const h = withCommon(cors(), obj.httpMetadata?.contentType || "application/json; charset=utf-8")
+  h.set("Cache-Control", `public, max-age=${ONE_YEAR}, immutable`)
+  const etag = obj.httpEtag
+  if (etag) h.set("ETag", etag)
+  if (etag && request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: h })
+  const encoding = obj.httpMetadata?.contentEncoding
+  if (encoding) h.set("Content-Encoding", encoding)
+  if (request.method === "HEAD") return new Response(null, { status: 200, headers: h })
+  return new Response(obj.body, { status: 200, headers: h, encodeBody: encoding ? "manual" : "automatic" })
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
@@ -88,6 +109,14 @@ export default {
         const [, ver, file] = m
         if (!JSON_FILES.has(file)) return new Response(JSON.stringify({ error: "invalid file" }), { status: 400, headers: withCommon(cors()) })
         return serveR2Object(request, env, `gtfs/${ver}/${file}`, ONE_YEAR, true, ctx)
+      }
+      if (url.pathname === "/bus/latest.json") return serveR2Object(request, env, "bus/latest.json", SHORT_60, false, ctx)
+      if (url.pathname === "/bus/status.json") return serveR2Object(request, env, "bus/status.json", SHORT_30, false, ctx)
+      const bus = url.pathname.match(/^\/bus\/([A-Za-z0-9-]+)\/(?:([a-z_]+\.json)|shards\/(\d{1,6}\.json))$/)
+      if (bus) {
+        const [, ver, file, shard] = bus
+        if (file && !BUS_FILES.has(file)) return new Response(JSON.stringify({ error: "invalid file" }), { status: 400, headers: withCommon(cors()) })
+        return serveGzippedObject(request, env, `bus/${ver}/${file ?? `shards/${shard}`}`)
       }
       return new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: withCommon(cors()) })
     } catch (err: any) {

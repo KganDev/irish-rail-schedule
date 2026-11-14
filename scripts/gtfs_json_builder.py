@@ -52,6 +52,11 @@ class ZipView:
         rows = list(reader)
         self.headers[filename] = tuple(reader.fieldnames or ())
         return rows
+    def open_text(self, filename: str):
+        name = self._find(filename)
+        if not name:
+            return None
+        return io.TextIOWrapper(self.zf.open(name), encoding="utf-8-sig", newline="")
 def download_zip(url: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(url, dest)
