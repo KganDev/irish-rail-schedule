@@ -1,0 +1,23 @@
+# A separate test Worker for the live Dublin Bus feed. It runs on a workers.dev address
+# and leaves the production Worker and its route alone. It writes only under live/ in
+# the bucket.
+name = "dartdublin-live-test"
+main = "src/index.ts"
+compatibility_date = "2025-10-31"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "GTFS"
+bucket_name = "dartdublin-gtfs"
+
+[[durable_objects.bindings]]
+name = "LIVE"
+class_name = "LiveFeed"
+
+# The free plan only allows SQLite backed Durable Objects.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LiveFeed"]
+
+[triggers]
+crons = ["*/5 * * * *"]

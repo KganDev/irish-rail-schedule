@@ -45,7 +45,38 @@ build. Check Actions for the latest attempt's result.
 ```sh
 python -m unittest discover -s tests -v
 python scripts/gtfs_json_builder.py
+node --test tests/live.test.ts
 ```
 
 The builder writes to `out/` by default and does not publish from a local run.
 Tests use local fixtures and run on pull requests without deployment credentials.
+
+## Live Dublin Bus feed (test)
+
+The NTA allows each key one call to its GTFS Realtime feed every 60 seconds, so apps
+cannot call it directly. A Durable Object in the Worker fetches the feed about once a
+minute, keeps only Dublin Bus trips, and writes one small file to R2 that every app
+reads.
+
+| Path | Contents |
+| --- | --- |
+| `/live/dublin-bus.json` | Delays, skipped stops, cancelled and added trips. `feedTime` is when the NTA produced the data. |
+| `/live/status.json` | Run and failure counts, sizes, and the last error. |
+
+In each trip, `updates` holds `[stop_sequence, seconds late]` pairs. A delay applies to
+the stops after it until the next pair.
+
+This runs as a separate test Worker, `dartdublin-live-test`, set up in
+`wrangler.live-test.toml`. Pushing to `big-test` deploys it and sets the `NTA_API`
+secret from the repository secret of the same name. The production Worker is not
+changed: without the `LIVE` binding it only serves the timetable.
+
+To run it locally, put `NTA_API=<key>` in `.dev.vars` (ignored by git), then:
+
+```sh
+npx wrangler dev --config wrangler.live-test.toml --test-scheduled
+curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
+curl http://localhost:8787/live/status.json
+```
+
+Data from the NTA is licensed under Creative Commons Attribution 4.0.

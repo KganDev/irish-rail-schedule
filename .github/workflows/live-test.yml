@@ -1,0 +1,47 @@
+name: Deploy live feed test
+# Deploys the separate test Worker for the live Dublin Bus feed. It never touches the
+# production Worker or its route.
+on:
+  push:
+    branches: [big-test]
+    paths:
+      - .github/workflows/live-test.yml
+      - src/**
+      - wrangler.live-test.toml
+permissions:
+  contents: read
+concurrency:
+  group: live-test
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Test live feed
+        run: node --test tests/live.test.ts
+
+      - name: Install Wrangler
+        run: npm i -g wrangler@4
+
+      - name: Use the published bucket
+        run: sed -i "s/^bucket_name = .*/bucket_name = \"${R2_BUCKET}\"/" wrangler.live-test.toml
+
+      - name: Deploy test Worker
+        run: wrangler deploy --config wrangler.live-test.toml
+
+      - name: Set NTA key
+        env:
+          NTA_API: ${{ secrets.NTA_API }}
+        run: printf '%s' "$NTA_API" | wrangler secret put NTA_API --config wrangler.live-test.toml

@@ -1,10 +1,19 @@
+import { LIVE_KEY, LIVE_STATUS_KEY } from "./live_feed"
+
+export { LiveFeed } from "./live_feed"
+
 export interface Env {
   GTFS: R2Bucket
+  // The live feed is optional: without these the Worker only serves the timetable.
+  LIVE?: DurableObjectNamespace
+  NTA_API?: string
+  LIVE_ROUTE_PREFIX?: string
 }
 
 const ONE_YEAR = 31536000
 const SHORT_60 = 60
 const SHORT_30 = 30
+const LIVE_TTL = 20
 
 const JSON_FILES = new Set([
   "stops.json",
@@ -72,6 +81,8 @@ export default {
       if (url.pathname === "/latest.json") return serveR2Object(request, env, "latest.json", SHORT_60, false, ctx)
       if (url.pathname === "/status.json") return serveR2Object(request, env, "status.json", SHORT_30, false, ctx)
       if (url.pathname === "/windows.json") return serveR2Object(request, env, "windows.json", 3600, false, ctx)
+      if (url.pathname === "/live/dublin-bus.json") return serveR2Object(request, env, LIVE_KEY, LIVE_TTL, false, ctx)
+      if (url.pathname === "/live/status.json") return serveR2Object(request, env, LIVE_STATUS_KEY, LIVE_TTL, false, ctx)
       const m = url.pathname.match(/^\/gtfs\/([A-Za-z0-9-]+)\/([a-z_]+\.json)$/)
       if (m) {
         const [, ver, file] = m
@@ -82,5 +93,10 @@ export default {
     } catch (err: any) {
       return new Response(JSON.stringify({ error: "internal", detail: String(err?.message || err) }), { status: 500, headers: withCommon(cors()) })
     }
+  },
+  // The live feed keeps itself running with alarms. This restarts it if that chain ever stops.
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (!env.LIVE) return
+    ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName("dublin-bus")).fetch("https://live/ensure"))
   }
 } satisfies ExportedHandler<Env>
