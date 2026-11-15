@@ -139,4 +139,13 @@ curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
 curl http://localhost:8787/live/status.json
 ```
 
+## Reading the bus files straight from the bucket
+
+Every bus path above is also the file's key in the R2 bucket, and each file is stored
+with the content type, encoding and cache time it should be sent with. Giving the
+bucket a public custom domain in the Cloudflare dashboard (R2, the bucket, Settings,
+Custom Domains) serves the same paths from that domain with no Worker in between, so
+app traffic does not count against the Worker request limit. The Worker keeps serving
+them too, and is still needed to run the live feed.
+
 Data from the NTA is licensed under Creative Commons Attribution 4.0.

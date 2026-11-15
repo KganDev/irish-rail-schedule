@@ -1,4 +1,4 @@
-import { LIVE_KEY, LIVE_STATUS_KEY } from "./live_feed"
+import { LIVE_KEY, LIVE_STATUS_KEY, LIVE_TTL } from "./live_feed"
 
 export { LiveFeed } from "./live_feed"
 
@@ -13,7 +13,6 @@ export interface Env {
 const ONE_YEAR = 31536000
 const SHORT_60 = 60
 const SHORT_30 = 30
-const LIVE_TTL = 20
 
 const JSON_FILES = new Set([
   "stops.json",

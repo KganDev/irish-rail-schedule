@@ -12,6 +12,10 @@ const DEFAULT_ROUTE_PREFIXES = ["1_", "3_", "03C_"]
 
 export const LIVE_KEY = "live/dublin-bus.json"
 export const LIVE_STATUS_KEY = "live/status.json"
+// Apps read these files straight from the bucket's public address, so each is stored with
+// the headers it should be sent with. The Worker sends the same time when asked instead.
+export const LIVE_TTL = 20
+const LIVE_HTTP = { contentType: "application/json", cacheControl: `public, max-age=${LIVE_TTL}` }
 
 interface LiveStatus {
   since: string
@@ -70,9 +74,7 @@ export class LiveFeed extends DurableObject<Env> {
     status.lastDurationMs = Date.now() - startedAt
     status.maxDurationMs = Math.max(status.maxDurationMs ?? 0, status.lastDurationMs)
     await this.ctx.storage.put("status", status)
-    await this.env.GTFS.put(LIVE_STATUS_KEY, JSON.stringify(status), {
-      httpMetadata: { contentType: "application/json" }
-    })
+    await this.env.GTFS.put(LIVE_STATUS_KEY, JSON.stringify(status), { httpMetadata: LIVE_HTTP })
   }
 
   private async publish(): Promise<Partial<LiveStatus>> {
@@ -93,7 +95,7 @@ export class LiveFeed extends DurableObject<Env> {
       vehicles.feed
     )
     const body = JSON.stringify(file)
-    await this.env.GTFS.put(LIVE_KEY, body, { httpMetadata: { contentType: "application/json" } })
+    await this.env.GTFS.put(LIVE_KEY, body, { httpMetadata: LIVE_HTTP })
 
     return {
       feedTime: file.feedTime,
