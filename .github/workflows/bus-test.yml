@@ -58,8 +58,9 @@ jobs:
       - name: Check upload
         run: |
           set -euo pipefail
-          wrangler r2 object get --remote "${R2_BUCKET}/bus/${{ steps.ver.outputs.version }}/stops.json" --file "$RUNNER_TEMP/stops.json.gz"
-          gzip -dc "$RUNNER_TEMP/stops.json.gz" | jq -e 'length > 0' > /dev/null
+          wrangler r2 object get --remote "${R2_BUCKET}/bus/${{ steps.ver.outputs.version }}/stops.json" --file "$RUNNER_TEMP/stops.check"
+          # Wrangler unpacks a gzipped object as it downloads it. Accept either form.
+          (gzip -dc "$RUNNER_TEMP/stops.check" 2>/dev/null || cat "$RUNNER_TEMP/stops.check") | jq -e 'length > 0' > /dev/null
 
       # The pointers go last, so latest.json never names files that are not there yet.
       - name: Upload pointers to R2
