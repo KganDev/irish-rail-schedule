@@ -62,7 +62,7 @@ eight, so an app fetches only the shards for the stops it shows.
 | --- | --- |
 | `/bus/latest.json` | The current version and its shard count. |
 | `/bus/status.json` | Counts and service dates of the last successful build. |
-| `/bus/<version>/stops.json` | Every stop: id, stop number, name, position, routes, and its shard. |
+| `/bus/<version>/stops.json` | Every stop: id, stop number, name, position, routes, the two places most of its buses head towards, and its shard. |
 | `/bus/<version>/routes.json` | Route numbers and descriptions. |
 | `/bus/<version>/calendar.json` | Which days each service runs, with added and removed dates. |
 | `/bus/<version>/shards/<shard>.json` | Departures for each stop in the shard. |

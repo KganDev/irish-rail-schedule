@@ -24,9 +24,9 @@ except Exception:
     ZoneInfo = None
 
 GTFS_URL_DEFAULT = "https://www.transportforireland.ie/transitData/Data/GTFS_Dublin_Bus.zip"
-# Bump when the shape of the published files changes, so apps never read a layout
-# they do not understand.
-FORMAT_VERSION = 1
+# Bump when the published files change in shape or in what they hold, so apps never read
+# a layout they do not understand and never keep a stale copy of a version.
+FORMAT_VERSION = 2
 DEFAULT_STOPS_PER_SHARD = 8
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
@@ -382,8 +382,16 @@ def build(
         )
 
     for stop in stops:
-        names = {trips[trip_id][0] for _, trip_id, _, _ in departures.get(stop["id"], [])}
+        stop_departures = departures.get(stop["id"], [])
+        names = {trips[trip_id][0] for _, trip_id, _, _ in stop_departures}
         stop["routes"] = sorted(names, key=_route_sort_key)
+        # Where most buses from this stop are heading, which tells the two sides of a
+        # road apart.
+        headsigns: Dict[str, int] = {}
+        for _, _, _, headsign in stop_departures:
+            if headsign:
+                headsigns[headsign] = headsigns.get(headsign, 0) + 1
+        stop["towards"] = sorted(headsigns, key=lambda name: (-headsigns[name], name))[:2]
         stop["shard"] = f"{shard_of[stop['id']]:0{width}d}"
     stops.sort(key=lambda stop: stop["id"])
     _dump(stops, version_dir / "stops.json")

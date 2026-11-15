@@ -109,7 +109,7 @@ class BusJsonBuilderTest(unittest.TestCase):
     def test_each_stop_lists_its_departures_in_time_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             version_dir, latest = self.build(Path(temp_dir))
-            self.assertEqual(latest["latest"], "bus-1-fixture")
+            self.assertEqual(latest["latest"], "bus-2-fixture")
             self.assertEqual(
                 self.departures(version_dir, "A1"),
                 [
@@ -134,6 +134,9 @@ class BusJsonBuilderTest(unittest.TestCase):
             version_dir, latest = self.build(Path(temp_dir))
             stops = {stop["id"]: stop for stop in self.read(version_dir, "stops.json")}
             self.assertEqual(stops["A1"]["routes"], ["27", "77A"])
+            # Most buses from A1 go to Citywest or Jobstown; one shows Via Town.
+            self.assertEqual(stops["A1"]["towards"], ["Citywest", "Jobstown"])
+            self.assertEqual(stops["Z"]["towards"], [])
             self.assertEqual(stops["A1"]["code"], "101")
             self.assertEqual(stops["A1"]["shard"], stops["A2"]["shard"])
             self.assertEqual(stops["B1"]["shard"], stops["B2"]["shard"])
@@ -240,12 +243,12 @@ class BusJsonBuilderTest(unittest.TestCase):
             version_dir, _ = self.build(Path(temp_dir))
             entries = bus_upload_list.pack(version_dir, Path(temp_dir) / "staging")
             keys = [entry["key"] for entry in entries]
-            self.assertIn("bus/bus-1-fixture/stops.json", keys)
-            self.assertIn("bus/bus-1-fixture/shards/000.json", keys)
-            self.assertIn("bus/bus-1-fixture/trips/77A.json", keys)
+            self.assertIn("bus/bus-2-fixture/stops.json", keys)
+            self.assertIn("bus/bus-2-fixture/shards/000.json", keys)
+            self.assertIn("bus/bus-2-fixture/trips/77A.json", keys)
             self.assertEqual(len(keys), 8)
             for entry in entries:
-                source = version_dir / entry["key"].removeprefix("bus/bus-1-fixture/")
+                source = version_dir / entry["key"].removeprefix("bus/bus-2-fixture/")
                 self.assertEqual(gzip.decompress(Path(entry["file"]).read_bytes()), source.read_bytes())
 
 
