@@ -1,4 +1,4 @@
-// Shrinks the NTA GTFS Realtime trip updates feed to the trips of one operator.
+// Shrinks the NTA GTFS Realtime trip updates feed to the trips of the chosen operators.
 // Kept free of Worker APIs so it runs under `node --test`.
 
 export interface FeedStopTimeEvent {
@@ -83,11 +83,14 @@ function toNumber(value: string | number | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+// `routePrefixes` picks the operators: a route id starts with its operator's number.
 export function buildLiveFile(
   feed: Feed,
-  routePrefix: string,
+  routePrefixes: string[],
   vehicleFeed?: VehicleFeed
 ): { file: LiveFile; stats: LiveStats } {
+  const wanted = (routeId: string | undefined): boolean =>
+    routeId !== undefined && routePrefixes.some(prefix => routeId.startsWith(prefix))
   const entities = feed.entity ?? []
   const trips: LiveTrip[] = []
   let updateCount = 0
@@ -95,7 +98,7 @@ export function buildLiveFile(
   for (const entity of entities) {
     const tripUpdate = entity.trip_update
     const trip = tripUpdate?.trip
-    if (!trip?.route_id || !trip.start_date || !trip.route_id.startsWith(routePrefix)) continue
+    if (!trip?.route_id || !trip.start_date || !wanted(trip.route_id)) continue
 
     const out: LiveTrip = { route: trip.route_id, date: trip.start_date }
     if (trip.trip_id) out.id = trip.trip_id
@@ -134,7 +137,7 @@ export function buildLiveFile(
   for (const entity of vehicleFeed?.entity ?? []) {
     const trip = entity.vehicle?.trip
     const position = entity.vehicle?.position
-    if (!trip?.trip_id || !trip.start_date || !trip.route_id?.startsWith(routePrefix)) continue
+    if (!trip?.trip_id || !trip.start_date || !wanted(trip.route_id)) continue
     if (typeof position?.latitude !== "number" || typeof position.longitude !== "number") continue
     // Five decimal places is about a metre.
     vehicles.push([

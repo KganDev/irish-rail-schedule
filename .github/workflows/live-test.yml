@@ -1,5 +1,5 @@
 name: Deploy live feed test
-# Deploys the separate test Worker for the live Dublin Bus feed. It never touches the
+# Deploys the separate test Worker for the live Dublin bus feed. It never touches the
 # production Worker or its route.
 on:
   push:

@@ -1,5 +1,5 @@
 name: Publish bus timetable test
-# Builds the Dublin Bus timetable and uploads it under bus/ in the bucket, where the
+# Builds the Dublin bus timetable and uploads it under bus/ in the bucket, where the
 # test Worker serves it. Nothing the production Worker serves is changed.
 on:
   push:

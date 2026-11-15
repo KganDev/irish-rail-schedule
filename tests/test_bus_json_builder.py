@@ -76,8 +76,44 @@ FIXTURE = {
 }
 
 
-def write_feed(path, changes=None):
-    files = {**FIXTURE, **(changes or {})}
+# A second operator. It shares stop A1, has a stop of its own, and uses the number 27 for
+# a different route.
+SECOND_OPERATOR = {
+    "agency.txt": (
+        ["agency_id", "agency_name", "agency_url", "agency_timezone"],
+        [["3", "Go-Ahead Ireland", "https://example.test", "Europe/Dublin"]],
+    ),
+    "stops.txt": (
+        ["stop_id", "stop_code", "stop_name", "stop_lat", "stop_lon"],
+        [["A1", "101", "Tallaght Rd", "53.3000", "-6.3000"], ["C1", "301", "Kildare Road", "53.2000", "-6.4000"]],
+    ),
+    "routes.txt": (
+        ["route_id", "route_short_name", "route_long_name"],
+        [["g27", "27", "Tallaght - Kildare"], ["gL1", "L1", "Kildare - Tallaght"]],
+    ),
+    "trips.txt": (
+        ["route_id", "service_id", "trip_id", "trip_headsign"],
+        [["g27", "ga-weekday", "g1", "Kildare"], ["gL1", "ga-weekday", "g2", "Tallaght"]],
+    ),
+    "stop_times.txt": (
+        ["trip_id", "arrival_time", "departure_time", "stop_id", "stop_sequence", "stop_headsign", "pickup_type"],
+        [
+            ["g1", "07:45:00", "07:45:00", "A1", "1", "", "0"],
+            ["g1", "08:15:00", "08:15:00", "C1", "2", "", "1"],
+            ["g2", "09:00:00", "09:00:00", "C1", "1", "", "0"],
+            ["g2", "09:30:00", "09:30:00", "A1", "2", "", "1"],
+        ],
+    ),
+    "calendar.txt": (
+        FIXTURE["calendar.txt"][0],
+        [["ga-weekday", "1", "1", "1", "1", "1", "0", "0", "20260901", "20261231"]],
+    ),
+    "feed_info.txt": (["feed_version"], [["fixture"]]),
+}
+
+
+def write_feed(path, changes=None, base=FIXTURE):
+    files = {**base, **(changes or {})}
     with zipfile.ZipFile(path, "w") as archive:
         for name, (header, rows) in files.items():
             out = io.StringIO()
@@ -95,6 +131,16 @@ class BusJsonBuilderTest(unittest.TestCase):
         latest = json.loads((temp / "out" / "bus" / "latest.json").read_text())
         return temp / "out" / "bus" / latest["latest"], latest
 
+    def build_two(self, temp, second_changes=None):
+        write_feed(temp / "feed.zip")
+        write_feed(temp / "second.zip", second_changes, base=SECOND_OPERATOR)
+        urls = [(temp / "feed.zip").as_uri(), (temp / "second.zip").as_uri()]
+        builder.build(
+            urls, temp / "out", TARGET, stops_per_shard=2, minimum_stops=1, minimum_trips=1, minimum_departures=1
+        )
+        latest = json.loads((temp / "out" / "bus" / "latest.json").read_text())
+        return temp / "out" / "bus" / latest["latest"], latest
+
     def read(self, version_dir, name):
         return json.loads((version_dir / name).read_text())
 
@@ -109,7 +155,7 @@ class BusJsonBuilderTest(unittest.TestCase):
     def test_each_stop_lists_its_departures_in_time_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             version_dir, latest = self.build(Path(temp_dir))
-            self.assertEqual(latest["latest"], "bus-2-fixture")
+            self.assertEqual(latest["latest"], "bus-3-fixture")
             self.assertEqual(
                 self.departures(version_dir, "A1"),
                 [
@@ -199,6 +245,66 @@ class BusJsonBuilderTest(unittest.TestCase):
             self.assertEqual(other["shapes"], [])
             self.assertEqual(other["trips"]["t2"], [0, 27000, [60, 1140]])
 
+    def test_two_operators_are_built_into_one_timetable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            version_dir, latest = self.build_two(Path(temp_dir))
+            # Feeds with the same version publish under it once.
+            self.assertEqual(latest["latest"], "bus-3-fixture")
+            # A stop both operators use lists the buses of both.
+            self.assertEqual(
+                [(trip, route) for _, trip, _, route, _, _ in self.departures(version_dir, "A1")],
+                [("t2", "77A"), ("g1", "27"), ("t1", "27"), ("t3", "27")],
+            )
+            stops = {stop["id"]: stop for stop in self.read(version_dir, "stops.json")}
+            self.assertEqual(len(stops), 6)
+            # The first feed's spelling of a shared stop is kept.
+            self.assertEqual(stops["A1"]["name"], "Tallaght Road")
+            self.assertEqual(stops["C1"]["routes"], ["L1"])
+            self.assertEqual(
+                [(route["id"], route["name"]) for route in self.read(version_dir, "routes.json")],
+                [("r27", "27"), ("g27", "27"), ("r77a", "77A"), ("gL1", "L1")],
+            )
+            calendar = self.read(version_dir, "calendar.json")
+            self.assertEqual(sorted(calendar["services"]), ["ga-weekday", "saturday", "weekday"])
+
+    def test_a_route_number_two_operators_share_says_whose_each_pattern_is(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            version_dir, _ = self.build_two(Path(temp_dir))
+            shared = self.read(version_dir, "trips/27.json")
+            self.assertEqual(sorted(shared["trips"]), ["g1", "t1", "t3"])
+            self.assertEqual(shared["routes"], ["g27", "r27"])
+            # One entry for each pattern, a position in `routes`.
+            self.assertEqual(shared["patterns"], [[0, 1], [0, 2, 3], [0, 3]])
+            self.assertEqual(shared["patternRoutes"], [0, 1, 1])
+            # A number only one operator uses needs neither.
+            alone = self.read(version_dir, "trips/L1.json")
+            self.assertNotIn("routes", alone)
+            self.assertNotIn("patternRoutes", alone)
+
+    def test_feeds_published_at_different_times_name_both_versions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, latest = self.build_two(Path(temp_dir), {"feed_info.txt": (["feed_version"], [["second"]])})
+            self.assertEqual(latest["latest"], "bus-3-fixture-second")
+
+    def test_feeds_that_claim_the_same_trip_or_service_are_rejected(self):
+        trips_header, trips = SECOND_OPERATOR["trips.txt"]
+        cases = {
+            "1 trip ids are also in an earlier feed, such as t1": {
+                "trips.txt": (trips_header, [["g27", "ga-weekday", "t1", "Kildare"], trips[1]]),
+            },
+            "1 service ids are also in an earlier feed, such as weekday": {
+                "trips.txt": (trips_header, [["g27", "weekday", "g1", "Kildare"], trips[1]]),
+            },
+            "1 route ids are also in an earlier feed, such as r27": {
+                "routes.txt": (SECOND_OPERATOR["routes.txt"][0], [["r27", "27", "Tallaght - Kildare"], ["gL1", "L1", "Kildare - Tallaght"]]),
+            },
+        }
+        for message, changes in cases.items():
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temp_dir:
+                with self.assertRaisesRegex(FeedValidationError, message):
+                    self.build_two(Path(temp_dir), changes)
+                self.assertFalse((Path(temp_dir) / "out").exists())
+
     def test_status_reports_counts_and_service_dates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             version_dir, _ = self.build(Path(temp_dir))
@@ -243,12 +349,12 @@ class BusJsonBuilderTest(unittest.TestCase):
             version_dir, _ = self.build(Path(temp_dir))
             entries = bus_upload_list.pack(version_dir, Path(temp_dir) / "staging")
             keys = [entry["key"] for entry in entries]
-            self.assertIn("bus/bus-2-fixture/stops.json", keys)
-            self.assertIn("bus/bus-2-fixture/shards/000.json", keys)
-            self.assertIn("bus/bus-2-fixture/trips/77A.json", keys)
+            self.assertIn("bus/bus-3-fixture/stops.json", keys)
+            self.assertIn("bus/bus-3-fixture/shards/000.json", keys)
+            self.assertIn("bus/bus-3-fixture/trips/77A.json", keys)
             self.assertEqual(len(keys), 8)
             for entry in entries:
-                source = version_dir / entry["key"].removeprefix("bus/bus-2-fixture/")
+                source = version_dir / entry["key"].removeprefix("bus/bus-3-fixture/")
                 self.assertEqual(gzip.decompress(Path(entry["file"]).read_bytes()), source.read_bytes())
 
 

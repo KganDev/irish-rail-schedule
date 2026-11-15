@@ -52,11 +52,18 @@ node --test tests/live.test.ts
 The builder writes to `out/` by default and does not publish from a local run.
 Tests use local fixtures and run on pull requests without deployment credentials.
 
-## Dublin Bus timetable (test)
+## Dublin bus timetable (test)
 
-The Dublin Bus feed has close to four million stop times, too many for an app to
-download whole. `scripts/bus_json_builder.py` groups neighbouring stops into shards of
-eight, so an app fetches only the shards for the stops it shows.
+Dublin Bus and Go-Ahead Ireland share stops, so `scripts/bus_json_builder.py` builds
+both operators' feeds into one timetable, and a stop lists every bus that calls there.
+Together they have about five million stop times, too many for an app to download
+whole. The builder groups neighbouring stops into shards of eight, so an app fetches
+only the shards for the stops it shows.
+
+The NTA gives each stop, trip, service and route an id that is unique across its feeds,
+and a shared stop has the same id in each. A build is rejected if two feeds claim the
+same trip, service or route. The published version names each feed's version once, so
+it changes when any feed does.
 
 | Path | Contents |
 | --- | --- |
@@ -66,7 +73,7 @@ eight, so an app fetches only the shards for the stops it shows.
 | `/bus/<version>/routes.json` | Route numbers and descriptions. |
 | `/bus/<version>/calendar.json` | Which days each service runs, with added and removed dates. |
 | `/bus/<version>/shards/<shard>.json` | Departures for each stop in the shard. |
-| `/bus/<version>/trips/<route>.json` | Every stop of every trip on one route, for showing a whole journey. |
+| `/bus/<version>/trips/<route>.json` | Every stop of every trip on one route number, for showing a whole journey. |
 
 A shard lists its `routes`, `headsigns` and `services` once. Each departure is
 `[seconds after midnight, trip_id, stop_sequence, route, headsign, service]`, where the
@@ -82,12 +89,17 @@ trip ends with a position in `shapes`, which holds each line as
 [encoded polyline](https://developers.google.com/maps/documentation/utilities/polylinealgorithm)
 text.
 
+Two operators can use one route number for different routes. That number's trip file
+then also has `routes`, the route ids, and `patternRoutes`, which gives each pattern's
+route as a position in `routes`.
+
 Versioned files are stored gzipped in R2 and sent as stored. Feeds with missing
 columns, unknown trips or stops, unreadable times, too few rows, or fewer than
 `MIN_COVERAGE_DAYS` of service left are rejected before anything is written.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `BUS_GTFS_URL` | Dublin Bus and Go-Ahead Ireland | The feeds to build, separated by commas. |
 | `STOPS_PER_SHARD` | `8` | Stops grouped into one file. |
 | `MIN_BUS_STOPS` | `1000` | Fewest stops a publishable feed may have. |
 | `MIN_BUS_TRIPS` | `10000` | Fewest trips. |
@@ -95,12 +107,14 @@ columns, unknown trips or stops, unreadable times, too few rows, or fewer than
 
 Pushing to `big-test` builds and uploads it under `bus/` in the bucket.
 
-## Live Dublin Bus feed (test)
+## Live Dublin bus feed (test)
 
 The NTA allows each key one call to its GTFS Realtime feed every 60 seconds, so apps
 cannot call it directly. A Durable Object in the Worker fetches the feed about once a
-minute, keeps only Dublin Bus trips, and writes one small file to R2 that every app
-reads.
+minute, keeps only the trips of the operators in the bus timetable, and writes one
+small file to R2 that every app reads. An operator is picked by the start of its route
+ids: `1_` for Dublin Bus, `3_` and `03C_` for Go-Ahead Ireland. Setting
+`LIVE_ROUTE_PREFIX` to a list separated by commas picks others.
 
 | Path | Contents |
 | --- | --- |

@@ -6,7 +6,9 @@ const FEED_URL = "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates?format=j
 const VEHICLES_URL = "https://api.nationaltransport.ie/gtfsr/v2/Vehicles?format=json"
 // The NTA allows each key one call to each feed every 60 seconds.
 const INTERVAL_MS = 61_000
-const DEFAULT_ROUTE_PREFIX = "1_"
+// Dublin Bus, then Go-Ahead Ireland's city and commuter routes. These are the operators
+// in the bus timetable; see GTFS_URLS_DEFAULT in scripts/bus_json_builder.py.
+const DEFAULT_ROUTE_PREFIXES = ["1_", "3_", "03C_"]
 
 export const LIVE_KEY = "live/dublin-bus.json"
 export const LIVE_STATUS_KEY = "live/status.json"
@@ -32,7 +34,7 @@ interface LiveStatus {
   outputBytes?: number
 }
 
-// Fetches the NTA feed about once a minute and publishes the Dublin Bus part of it to R2.
+// Fetches the NTA feed about once a minute and publishes the Dublin city bus part of it to R2.
 // One object does this for everyone, so phones never call the NTA and never see the key.
 export class LiveFeed extends DurableObject<Env> {
   // Starts the alarm chain if it is not running. The cron trigger calls this as a watchdog.
@@ -87,7 +89,7 @@ export class LiveFeed extends DurableObject<Env> {
 
     const { file, stats } = buildLiveFile(
       JSON.parse(text) as Feed,
-      this.env.LIVE_ROUTE_PREFIX || DEFAULT_ROUTE_PREFIX,
+      this.routePrefixes(),
       vehicles.feed
     )
     const body = JSON.stringify(file)
@@ -103,6 +105,13 @@ export class LiveFeed extends DurableObject<Env> {
       vehiclesError: vehicles.error,
       outputBytes: body.length
     }
+  }
+
+  // LIVE_ROUTE_PREFIX can name other operators, separated by commas.
+  private routePrefixes(): string[] {
+    const chosen = (this.env.LIVE_ROUTE_PREFIX ?? "").split(",").map(prefix => prefix.trim())
+    const prefixes = chosen.filter(prefix => prefix !== "")
+    return prefixes.length ? prefixes : DEFAULT_ROUTE_PREFIXES
   }
 
   private async vehicles(headers: Record<string, string>): Promise<{ feed?: VehicleFeed; error?: string }> {

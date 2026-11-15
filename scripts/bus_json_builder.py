@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Builds the Dublin Bus GTFS feed into per-stop departure files.
+"""Builds the Dublin city bus GTFS feeds into per-stop departure files.
+
+Dublin Bus and Go-Ahead Ireland share stops, so their feeds are built into one
+timetable: a stop then lists every bus that calls there, whoever runs it.
 
 The bus timetable has millions of stop times, far too many for an app to download
 whole. Stops are grouped into shards of neighbouring stops, and an app fetches only
@@ -13,7 +16,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from gtfs_json_builder import ZipView, _date_to_yyyymmdd, _yyyymmdd_to_date, download_zip
 from gtfs_quality import DEFAULT_MIN_COVERAGE_DAYS, FeedValidationError, _time_seconds
@@ -23,10 +26,15 @@ try:
 except Exception:
     ZoneInfo = None
 
-GTFS_URL_DEFAULT = "https://www.transportforireland.ie/transitData/Data/GTFS_Dublin_Bus.zip"
+# One feed per operator. The NTA gives every stop, trip, service and shape an id that is
+# unique across its feeds, and shared stops carry the same id in each.
+GTFS_URLS_DEFAULT = (
+    "https://www.transportforireland.ie/transitData/Data/GTFS_Dublin_Bus.zip",
+    "https://www.transportforireland.ie/transitData/Data/GTFS_GoAhead.zip",
+)
 # Bump when the published files change in shape or in what they hold, so apps never read
 # a layout they do not understand and never keep a stale copy of a version.
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 DEFAULT_STOPS_PER_SHARD = 8
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
@@ -160,7 +168,7 @@ def _dump(obj, path: Path) -> None:
 
 
 def build(
-    gtfs_url: str,
+    gtfs_urls: Union[str, Sequence[str]],
     out_dir: Path,
     target_date: Optional[date],
     *,
@@ -172,41 +180,94 @@ def build(
 ) -> None:
     if stops_per_shard < 1:
         raise ValueError("STOPS_PER_SHARD must be positive")
+    if isinstance(gtfs_urls, str):
+        gtfs_urls = [gtfs_urls]
+    if not gtfs_urls:
+        raise ValueError("at least one GTFS feed is required")
 
     tmp = out_dir.parent / ".tmp"
     tmp.mkdir(parents=True, exist_ok=True)
-    zip_path = tmp / "dublin_bus.zip"
-    print(f"Downloading {gtfs_url}")
-    download_zip(gtfs_url, zip_path)
-    z = ZipView(zip_path)
+    feeds: List[ZipView] = []
+    for number, gtfs_url in enumerate(gtfs_urls):
+        zip_path = tmp / f"bus_{number}.zip"
+        print(f"Downloading {gtfs_url}")
+        download_zip(gtfs_url, zip_path)
+        feeds.append(ZipView(zip_path))
 
-    agencies = z.read_csv("agency.txt")
-    stop_rows = z.read_csv("stops.txt")
-    route_rows = z.read_csv("routes.txt")
-    trip_rows = z.read_csv("trips.txt")
-    calendar_rows = z.read_csv("calendar.txt")
-    calendar_dates = z.read_csv("calendar_dates.txt")
-    feed_info = z.read_csv("feed_info.txt")
-    stop_times = z.open_text("stop_times.txt")
-
+    # The feeds are read as one. A stop both feeds have is kept once; anything else that
+    # two feeds both claim would mix one operator's buses into another's, so it is refused.
     errors: List[str] = []
-    stop_times_reader = csv.reader(stop_times) if stop_times else None
-    stop_times_header = next(stop_times_reader, []) if stop_times_reader else []
-    headers = {**z.headers, "stop_times.txt": tuple(stop_times_header)}
-    for filename, columns in REQUIRED_COLUMNS.items():
-        missing = [column for column in columns if column not in headers.get(filename, ())]
-        if missing:
-            errors.append(f"{filename} is missing or lacks {', '.join(missing)}")
-    if not calendar_rows and not calendar_dates:
-        errors.append("calendar.txt and calendar_dates.txt are both missing or empty")
+    agencies: List[Dict] = []
+    stop_rows: List[Dict] = []
+    route_rows: List[Dict] = []
+    trip_rows: List[Dict] = []
+    calendar_rows: List[Dict] = []
+    calendar_dates: List[Dict] = []
+    feed_versions: List[str] = []
+    stop_times_readers = []
+    seen_stops: set = set()
+    seen: Dict[str, set] = {"route": set(), "trip": set(), "service": set()}
+    for number, z in enumerate(feeds):
+        name = f"feed {number + 1}"
+        feed_agencies = z.read_csv("agency.txt")
+        feed_stops = z.read_csv("stops.txt")
+        feed_routes = z.read_csv("routes.txt")
+        feed_trips = z.read_csv("trips.txt")
+        feed_calendar = z.read_csv("calendar.txt")
+        feed_calendar_dates = z.read_csv("calendar_dates.txt")
+        feed_info = z.read_csv("feed_info.txt")
+        stop_times = z.open_text("stop_times.txt")
+
+        reader = csv.reader(stop_times) if stop_times else None
+        header = next(reader, []) if reader else []
+        headers = {**z.headers, "stop_times.txt": tuple(header)}
+        feed_errors = []
+        for filename, columns in REQUIRED_COLUMNS.items():
+            missing = [column for column in columns if column not in headers.get(filename, ())]
+            if missing:
+                feed_errors.append(f"{name}: {filename} is missing or lacks {', '.join(missing)}")
+        if not feed_calendar and not feed_calendar_dates:
+            feed_errors.append(f"{name}: calendar.txt and calendar_dates.txt are both missing or empty")
+        if feed_errors:
+            errors.extend(feed_errors)
+            continue
+
+        feed_version = (feed_info[0].get("feed_version") or "").strip() if feed_info else ""
+        if not feed_version:
+            errors.append(f"{name}: feed_info.txt has no feed_version")
+        elif feed_version not in feed_versions:
+            feed_versions.append(feed_version)
+
+        services = {row["service_id"] for row in feed_trips}
+        for kind, ids in (
+            ("route", {row["route_id"] for row in feed_routes}),
+            ("trip", {row["trip_id"] for row in feed_trips}),
+            ("service", services),
+        ):
+            shared = seen[kind] & ids
+            if shared:
+                errors.append(f"{name}: {len(shared)} {kind} ids are also in an earlier feed, such as {min(shared)}")
+            seen[kind] |= ids
+
+        agencies.extend(feed_agencies)
+        for row in feed_stops:
+            if row["stop_id"] not in seen_stops:
+                seen_stops.add(row["stop_id"])
+                stop_rows.append(row)
+        route_rows.extend(feed_routes)
+        trip_rows.extend(feed_trips)
+        # A feed lists only its own services, but only rows its trips use are kept, so a
+        # stray row can never change another feed's running days.
+        calendar_rows.extend(row for row in feed_calendar if row.get("service_id") in services)
+        calendar_dates.extend(row for row in feed_calendar_dates if row.get("service_id") in services)
+        stop_times_readers.append((reader, header))
     if errors:
         raise FeedValidationError(errors)
 
     target_date = target_date or _today(agencies)
-    raw_version = (feed_info[0].get("feed_version") or "").strip() if feed_info else ""
-    if not raw_version:
-        raise FeedValidationError(["feed_info.txt has no feed_version"])
-    version = f"bus-{FORMAT_VERSION}-{raw_version}"
+    # The feeds usually share a version. When one is republished ahead of the others,
+    # naming each keeps the published version changing with any of them.
+    version = f"bus-{FORMAT_VERSION}-{'-'.join(feed_versions)}"
 
     route_names = {row["route_id"]: row["route_short_name"].strip() for row in route_rows}
     # Route numbers name the trip files, so they must be safe in a path.
@@ -221,6 +282,7 @@ def build(
             continue
         trips[row["trip_id"]] = (route_name, (row.get("trip_headsign") or "").strip(), row["service_id"])
     trip_shapes = {row["trip_id"]: row.get("shape_id") or "" for row in trip_rows}
+    trip_routes = {row["trip_id"]: row["route_id"] for row in trip_rows}
 
     services = {service for _, _, service in trips.values()}
     service_dates = _service_dates(calendar_rows, calendar_dates, services)
@@ -252,35 +314,35 @@ def build(
         })
     known_stops = {stop["id"] for stop in stops}
 
-    column = {name: index for index, name in enumerate(stop_times_header)}
-    trip_at, departure_at, arrival_at = column["trip_id"], column["departure_time"], column.get("arrival_time")
-    stop_at, sequence_at = column["stop_id"], column["stop_sequence"]
-    headsign_at, pickup_at = column.get("stop_headsign"), column.get("pickup_type")
-
     departures: Dict[str, List[Departure]] = {}
     trip_stops: Dict[str, List[TripStop]] = {}
     unknown_trips = unknown_stops = bad_rows = 0
-    for row in stop_times_reader:
-        trip = trips.get(row[trip_at])
-        if trip is None:
-            unknown_trips += 1
-            continue
-        if row[stop_at] not in known_stops:
-            unknown_stops += 1
-            continue
-        seconds = _time_seconds(row[departure_at])
-        if seconds is None and arrival_at is not None:
-            seconds = _time_seconds(row[arrival_at])
-        if seconds is None or not row[sequence_at].isdigit():
-            bad_rows += 1
-            continue
-        sequence = int(row[sequence_at])
-        trip_stops.setdefault(row[trip_at], []).append((sequence, row[stop_at], seconds))
-        # A stop that only lets passengers off is not a departure anyone can catch.
-        if pickup_at is not None and row[pickup_at] == "1":
-            continue
-        headsign = (row[headsign_at].strip() if headsign_at is not None else "") or trip[1]
-        departures.setdefault(row[stop_at], []).append((seconds, row[trip_at], sequence, headsign))
+    for stop_times_reader, stop_times_header in stop_times_readers:
+        column = {name: index for index, name in enumerate(stop_times_header)}
+        trip_at, departure_at, arrival_at = column["trip_id"], column["departure_time"], column.get("arrival_time")
+        stop_at, sequence_at = column["stop_id"], column["stop_sequence"]
+        headsign_at, pickup_at = column.get("stop_headsign"), column.get("pickup_type")
+        for row in stop_times_reader:
+            trip = trips.get(row[trip_at])
+            if trip is None:
+                unknown_trips += 1
+                continue
+            if row[stop_at] not in known_stops:
+                unknown_stops += 1
+                continue
+            seconds = _time_seconds(row[departure_at])
+            if seconds is None and arrival_at is not None:
+                seconds = _time_seconds(row[arrival_at])
+            if seconds is None or not row[sequence_at].isdigit():
+                bad_rows += 1
+                continue
+            sequence = int(row[sequence_at])
+            trip_stops.setdefault(row[trip_at], []).append((sequence, row[stop_at], seconds))
+            # A stop that only lets passengers off is not a departure anyone can catch.
+            if pickup_at is not None and row[pickup_at] == "1":
+                continue
+            headsign = (row[headsign_at].strip() if headsign_at is not None else "") or trip[1]
+            departures.setdefault(row[stop_at], []).append((seconds, row[trip_at], sequence, headsign))
 
     # The trip files give a stop's sequence by its place in the list, so every trip must
     # count its stops 1, 2, 3 with none missing.
@@ -349,7 +411,9 @@ def build(
     # One file per route with every stop of every trip, for showing a whole journey. Trips
     # on a route share a few stop patterns, and the gaps between stops repeat, so this
     # stays small. Each trip also names the line it follows on a map, where the feed has it.
-    shapes = _read_shapes(z)
+    shapes: Dict[str, str] = {}
+    for z in feeds:
+        shapes.update(_read_shapes(z))
     trips_by_route: Dict[str, List[str]] = {}
     for trip_id in trip_stops:
         trips_by_route.setdefault(trips[trip_id][0], []).append(trip_id)
@@ -357,29 +421,37 @@ def build(
         stop_index: Dict[str, int] = {}
         pattern_index: Dict[Tuple[int, ...], int] = {}
         shape_index: Dict[str, int] = {}
+        # Two operators can use one route number for different routes. The file then says
+        # which route each stop pattern belongs to, so the two can be told apart.
+        route_ids = sorted({trip_routes[trip_id] for trip_id in trip_ids})
+        pattern_routes: List[int] = []
         route_trips = {}
         for trip_id in sorted(trip_ids):
             stops_of_trip = trip_stops[trip_id]
             pattern = tuple(stop_index.setdefault(stop_id, len(stop_index)) for _, stop_id, _ in stops_of_trip)
             times = [seconds for _, _, seconds in stops_of_trip]
+            if pattern not in pattern_index:
+                pattern_index[pattern] = len(pattern_index)
+                pattern_routes.append(route_ids.index(trip_routes[trip_id]))
             route_trips[trip_id] = [
-                pattern_index.setdefault(pattern, len(pattern_index)),
+                pattern_index[pattern],
                 times[0],
                 [later - earlier for earlier, later in zip(times, times[1:])],
             ]
             shape_id = trip_shapes.get(trip_id, "")
             if shape_id in shapes:
                 route_trips[trip_id].append(shape_index.setdefault(shape_id, len(shape_index)))
-        _dump(
-            {
-                "version": FORMAT_VERSION,
-                "stops": list(stop_index),
-                "patterns": [list(pattern) for pattern in pattern_index],
-                "shapes": [shapes[shape_id] for shape_id in shape_index],
-                "trips": route_trips,
-            },
-            version_dir / "trips" / f"{route_name}.json",
-        )
+        route_file = {
+            "version": FORMAT_VERSION,
+            "stops": list(stop_index),
+            "patterns": [list(pattern) for pattern in pattern_index],
+            "shapes": [shapes[shape_id] for shape_id in shape_index],
+            "trips": route_trips,
+        }
+        if len(route_ids) > 1:
+            route_file["routes"] = route_ids
+            route_file["patternRoutes"] = pattern_routes
+        _dump(route_file, version_dir / "trips" / f"{route_name}.json")
 
     for stop in stops:
         stop_departures = departures.get(stop["id"], [])
@@ -472,7 +544,9 @@ def build(
 
 if __name__ == "__main__":
     try:
-        gtfs_url = os.environ.get("BUS_GTFS_URL", GTFS_URL_DEFAULT)
+        # Several feeds are separated by commas or spaces.
+        gtfs_urls = re.split(r"[,\s]+", os.environ.get("BUS_GTFS_URL", "").strip())
+        gtfs_urls = [url for url in gtfs_urls if url] or list(GTFS_URLS_DEFAULT)
         out_dir = Path(os.environ.get("OUT_DIR", "out"))
         stops_per_shard = int(os.environ.get("STOPS_PER_SHARD") or DEFAULT_STOPS_PER_SHARD)
         minimum_stops = int(os.environ.get("MIN_BUS_STOPS") or 1000)
@@ -488,7 +562,7 @@ if __name__ == "__main__":
         sys.exit(1)
     try:
         build(
-            gtfs_url,
+            gtfs_urls,
             out_dir,
             target_date,
             stops_per_shard=stops_per_shard,

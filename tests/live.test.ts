@@ -44,7 +44,7 @@ const feed: Feed = {
 }
 
 test("keeps only the operator's trips and counts what it kept", () => {
-  const { file, stats } = buildLiveFile(feed, "1_")
+  const { file, stats } = buildLiveFile(feed, ["1_"])
 
   assert.equal(file.version, 1)
   assert.equal(file.feedTime, 1794696546)
@@ -68,14 +68,36 @@ test("bus positions are kept for the operator's trips", () => {
       { vehicle: { trip: { trip_id: "6055_2", start_date: "20261114", route_id: "1_1_e_a" } } }
     ]
   }
-  const { file, stats } = buildLiveFile(feed, "1_", vehicles)
+  const { file, stats } = buildLiveFile(feed, ["1_"], vehicles)
 
   assert.deepEqual(file.vehicles, [["6055_10141", "20261114", 53.20954, -6.73847]])
   assert.equal(stats.vehicles, 1)
 })
 
+test("several operators can be kept at once", () => {
+  const vehicles: VehicleFeed = {
+    entity: [
+      { vehicle: { trip: { trip_id: "6018_977", start_date: "20261114", route_id: "03C_126_e_a" }, position: { latitude: 53.2, longitude: -6.7 } } },
+      { vehicle: { trip: { trip_id: "6020_66428", start_date: "20261114", route_id: "2_51_c_b" }, position: { latitude: 51.9, longitude: -8.4 } } }
+    ]
+  }
+  const goAhead: Feed = {
+    entity: [
+      ...(feed.entity ?? []),
+      { trip_update: { trip: { trip_id: "6018_1", start_date: "20261114", route_id: "3_L1_c_a" } } },
+      // A route id must start with the prefix, not merely contain it.
+      { trip_update: { trip: { trip_id: "6020_2", start_date: "20261114", route_id: "23_1_a" } } }
+    ]
+  }
+  const { file, stats } = buildLiveFile(goAhead, ["1_", "3_", "03C_"], vehicles)
+
+  assert.deepEqual(file.trips.map(trip => trip.route), ["1_27_c_a", "1_1_e_a", "1_40_d", "3_L1_c_a"])
+  assert.deepEqual(file.vehicles, [["6018_977", "20261114", 53.2, -6.7]])
+  assert.equal(stats.feedTrips, 6)
+})
+
 test("a running trip carries its delays and skipped stops", () => {
-  const [trip] = buildLiveFile(feed, "1_").file.trips
+  const [trip] = buildLiveFile(feed, ["1_"]).file.trips
 
   assert.deepEqual(trip, {
     id: "6055_10141",
@@ -89,7 +111,7 @@ test("a running trip carries its delays and skipped stops", () => {
 })
 
 test("cancelled and added trips are marked", () => {
-  const [, canceled, added] = buildLiveFile(feed, "1_").file.trips
+  const [, canceled, added] = buildLiveFile(feed, ["1_"]).file.trips
 
   assert.deepEqual(canceled, { id: "6055_2", route: "1_1_e_a", date: "20261114", canceled: true })
   assert.deepEqual(added, {
@@ -103,7 +125,7 @@ test("cancelled and added trips are marked", () => {
 })
 
 test("an empty feed gives an empty file", () => {
-  const { file, stats } = buildLiveFile({}, "1_")
+  const { file, stats } = buildLiveFile({}, ["1_"])
 
   assert.deepEqual(file, { version: 1, feedTime: 0, trips: [], vehicles: [] })
   assert.deepEqual(stats, { feedTrips: 0, trips: 0, updates: 0, vehicles: 0 })
