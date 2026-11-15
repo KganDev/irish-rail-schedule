@@ -40,6 +40,8 @@ REQUIRED_COLUMNS = {
 
 # A departure at one stop: seconds after midnight, trip, stop_sequence, headsign.
 Departure = Tuple[int, str, int, str]
+# One stop of a trip: stop_sequence, stop, seconds after midnight.
+TripStop = Tuple[int, str, int]
 
 
 def _today(agencies: List[Dict]) -> date:
@@ -160,6 +162,10 @@ def build(
     version = f"bus-{FORMAT_VERSION}-{raw_version}"
 
     route_names = {row["route_id"]: row["route_short_name"].strip() for row in route_rows}
+    # Route numbers name the trip files, so they must be safe in a path.
+    for name in sorted(set(route_names.values())):
+        if not re.fullmatch(r"[A-Za-z0-9]+", name):
+            errors.append(f"route number {name!r} has characters other than letters and digits")
     trips: Dict[str, Tuple[str, str, str]] = {}
     for row in trip_rows:
         route_name = route_names.get(row["route_id"])
@@ -204,11 +210,9 @@ def build(
     headsign_at, pickup_at = column.get("stop_headsign"), column.get("pickup_type")
 
     departures: Dict[str, List[Departure]] = {}
+    trip_stops: Dict[str, List[TripStop]] = {}
     unknown_trips = unknown_stops = bad_rows = 0
     for row in stop_times_reader:
-        # A stop that only lets passengers off is not a departure anyone can catch.
-        if pickup_at is not None and row[pickup_at] == "1":
-            continue
         trip = trips.get(row[trip_at])
         if trip is None:
             unknown_trips += 1
@@ -222,14 +226,28 @@ def build(
         if seconds is None or not row[sequence_at].isdigit():
             bad_rows += 1
             continue
+        sequence = int(row[sequence_at])
+        trip_stops.setdefault(row[trip_at], []).append((sequence, row[stop_at], seconds))
+        # A stop that only lets passengers off is not a departure anyone can catch.
+        if pickup_at is not None and row[pickup_at] == "1":
+            continue
         headsign = (row[headsign_at].strip() if headsign_at is not None else "") or trip[1]
-        departures.setdefault(row[stop_at], []).append((seconds, row[trip_at], int(row[sequence_at]), headsign))
+        departures.setdefault(row[stop_at], []).append((seconds, row[trip_at], sequence, headsign))
+
+    # The trip files give a stop's sequence by its place in the list, so every trip must
+    # count its stops 1, 2, 3 with none missing.
+    uneven_trips = 0
+    for stops_of_trip in trip_stops.values():
+        stops_of_trip.sort()
+        if [sequence for sequence, _, _ in stops_of_trip] != list(range(1, len(stops_of_trip) + 1)):
+            uneven_trips += 1
 
     departure_count = sum(len(rows) for rows in departures.values())
     for count, problem in (
         (unknown_trips, "stop times use a trip that trips.txt does not have"),
         (unknown_stops, "stop times use a stop that stops.txt does not have"),
         (bad_rows, "stop times have an unreadable time or stop_sequence"),
+        (uneven_trips, "trips do not number their stops 1, 2, 3 in order"),
     ):
         if count:
             errors.append(f"{count} {problem}")
@@ -278,6 +296,35 @@ def build(
                 "stops": shard_stops,
             },
             version_dir / "shards" / f"{index:0{width}d}.json",
+        )
+
+    # One file per route with every stop of every trip, for showing a whole journey. Trips
+    # on a route share a few stop patterns, and the gaps between stops repeat, so this
+    # stays small.
+    trips_by_route: Dict[str, List[str]] = {}
+    for trip_id in trip_stops:
+        trips_by_route.setdefault(trips[trip_id][0], []).append(trip_id)
+    for route_name, trip_ids in trips_by_route.items():
+        stop_index: Dict[str, int] = {}
+        pattern_index: Dict[Tuple[int, ...], int] = {}
+        route_trips = {}
+        for trip_id in sorted(trip_ids):
+            stops_of_trip = trip_stops[trip_id]
+            pattern = tuple(stop_index.setdefault(stop_id, len(stop_index)) for _, stop_id, _ in stops_of_trip)
+            times = [seconds for _, _, seconds in stops_of_trip]
+            route_trips[trip_id] = [
+                pattern_index.setdefault(pattern, len(pattern_index)),
+                times[0],
+                [later - earlier for earlier, later in zip(times, times[1:])],
+            ]
+        _dump(
+            {
+                "version": FORMAT_VERSION,
+                "stops": list(stop_index),
+                "patterns": [list(pattern) for pattern in pattern_index],
+                "trips": route_trips,
+            },
+            version_dir / "trips" / f"{route_name}.json",
         )
 
     for stop in stops:
@@ -341,6 +388,7 @@ def build(
         "trips": len(trips),
         "departures": departure_count,
         "shards": shard_count,
+        "tripFiles": len(trips_by_route),
     }
     _dump(latest, out_dir / "bus" / "latest.json")
     _dump(

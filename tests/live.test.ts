@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { buildLiveFile, type Feed } from "../src/live.ts"
+import { buildLiveFile, type Feed, type VehicleFeed } from "../src/live.ts"
 
 const feed: Feed = {
   header: { timestamp: "1794696546" },
@@ -49,7 +49,29 @@ test("keeps only the operator's trips and counts what it kept", () => {
   assert.equal(file.version, 1)
   assert.equal(file.feedTime, 1794696546)
   assert.deepEqual(file.trips.map(trip => trip.route), ["1_27_c_a", "1_1_e_a", "1_40_d"])
-  assert.deepEqual(stats, { feedTrips: 4, trips: 3, updates: 4 })
+  assert.deepEqual(stats, { feedTrips: 4, trips: 3, updates: 4, vehicles: 0 })
+  assert.deepEqual(file.vehicles, [])
+})
+
+test("bus positions are kept for the operator's trips", () => {
+  const vehicles: VehicleFeed = {
+    entity: [
+      {
+        vehicle: {
+          trip: { trip_id: "6055_10141", start_date: "20261114", route_id: "1_27_c_a" },
+          position: { latitude: 53.2095375, longitude: -6.73847294 }
+        }
+      },
+      // Another operator, a bus with no trip, and a bus with no position.
+      { vehicle: { trip: { trip_id: "6018_977", start_date: "20261114", route_id: "03C_126_e_a" }, position: { latitude: 53.2, longitude: -6.7 } } },
+      { vehicle: { trip: { start_date: "20261114", route_id: "1_40_d" }, position: { latitude: 53.3, longitude: -6.2 } } },
+      { vehicle: { trip: { trip_id: "6055_2", start_date: "20261114", route_id: "1_1_e_a" } } }
+    ]
+  }
+  const { file, stats } = buildLiveFile(feed, "1_", vehicles)
+
+  assert.deepEqual(file.vehicles, [["6055_10141", "20261114", 53.20954, -6.73847]])
+  assert.equal(stats.vehicles, 1)
 })
 
 test("a running trip carries its delays and skipped stops", () => {
@@ -83,6 +105,6 @@ test("cancelled and added trips are marked", () => {
 test("an empty feed gives an empty file", () => {
   const { file, stats } = buildLiveFile({}, "1_")
 
-  assert.deepEqual(file, { version: 1, feedTime: 0, trips: [] })
-  assert.deepEqual(stats, { feedTrips: 0, trips: 0, updates: 0 })
+  assert.deepEqual(file, { version: 1, feedTime: 0, trips: [], vehicles: [] })
+  assert.deepEqual(stats, { feedTrips: 0, trips: 0, updates: 0, vehicles: 0 })
 })

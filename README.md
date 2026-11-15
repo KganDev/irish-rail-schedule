@@ -66,12 +66,18 @@ eight, so an app fetches only the shards for the stops it shows.
 | `/bus/<version>/routes.json` | Route numbers and descriptions. |
 | `/bus/<version>/calendar.json` | Which days each service runs, with added and removed dates. |
 | `/bus/<version>/shards/<shard>.json` | Departures for each stop in the shard. |
+| `/bus/<version>/trips/<route>.json` | Every stop of every trip on one route, for showing a whole journey. |
 
 A shard lists its `routes`, `headsigns` and `services` once. Each departure is
 `[seconds after midnight, trip_id, stop_sequence, route, headsign, service]`, where the
 last three are positions in those lists. Times past midnight run over 86400 and belong
 to the service day they started on. Stops where a trip only lets passengers off are
 left out. `trip_id` and `stop_sequence` match the live feed below.
+
+A trip file lists the route's `stops` once and its stop `patterns` as positions in that
+list. Each trip is `[pattern, seconds after midnight at the first stop, seconds between
+each stop and the next]`. A stop's `stop_sequence` is its place in the pattern, counting
+from 1, and the last stop is included.
 
 Versioned files are stored gzipped in R2 and sent as stored. Feeds with missing
 columns, unknown trips or stops, unreadable times, too few rows, or fewer than
@@ -95,11 +101,13 @@ reads.
 
 | Path | Contents |
 | --- | --- |
-| `/live/dublin-bus.json` | Delays, skipped stops, cancelled and added trips. `feedTime` is when the NTA produced the data. |
+| `/live/dublin-bus.json` | Delays, skipped stops, cancelled and added trips, and where each bus is. `feedTime` is when the NTA produced the data. |
 | `/live/status.json` | Run and failure counts, sizes, and the last error. |
 
 In each trip, `updates` holds `[stop_sequence, seconds late]` pairs. A delay applies to
-the stops after it until the next pair.
+the stops after it until the next pair. `vehicles` holds
+`[trip_id, service date, latitude, longitude]` for each bus, and is empty when the NTA
+positions feed could not be read.
 
 This runs as a separate test Worker, `dartdublin-live-test`, set up in
 `wrangler.live-test.toml`. Pushing to `big-test` deploys it and sets the `NTA_API`

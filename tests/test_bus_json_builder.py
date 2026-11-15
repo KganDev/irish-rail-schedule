@@ -159,12 +159,27 @@ class BusJsonBuilderTest(unittest.TestCase):
             )
             self.assertEqual(calendar["services"]["saturday"]["added"], ["20261225"])
 
+    def test_each_route_lists_every_stop_of_its_trips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            version_dir, _ = self.build(Path(temp_dir))
+            route = self.read(version_dir, "trips/27.json")
+            # Both trips on the 27 start at A1; one runs on to B1 before the terminus.
+            self.assertEqual(route["stops"], ["A1", "B1", "Z"])
+            self.assertEqual(route["patterns"], [[0, 1, 2], [0, 2]])
+            # Pattern, time at the first stop, then the seconds between stops. The last
+            # stop is included although nobody can board there.
+            self.assertEqual(route["trips"], {"t1": [0, 28800, [630, 1170]], "t3": [1, 87000, [1800]]})
+            self.assertEqual(list(self.read(version_dir, "trips/77A.json")["trips"]), ["t2"])
+
     def test_status_reports_counts_and_service_dates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             version_dir, _ = self.build(Path(temp_dir))
             status = json.loads((version_dir.parent / "status.json").read_text())
             self.assertTrue(status["ok"])
-            self.assertEqual(status["counts"], {"stops": 5, "routes": 2, "trips": 3, "departures": 5, "shards": 3})
+            self.assertEqual(
+                status["counts"],
+                {"stops": 5, "routes": 2, "trips": 3, "departures": 5, "shards": 3, "tripFiles": 2},
+            )
             self.assertEqual(status["service"], {"startDate": "20260901", "endDate": "20261231"})
 
     def test_rejected_feeds_write_nothing(self):
@@ -179,6 +194,10 @@ class BusJsonBuilderTest(unittest.TestCase):
             "stop that stops.txt does not have": {"stop_times.txt": (stop_times_header, stop_times + [["t1", "09:00:00", "09:00:00", "nowhere", "4", "", "0"]])},
             "unreadable time": {"stop_times.txt": (stop_times_header, stop_times + [["t1", "soon", "soon", "A2", "4", "", "0"]])},
             "lacks stop_sequence": {"stop_times.txt": (["trip_id", "departure_time", "stop_id"], [["t1", "08:00:00", "A1"]])},
+            "do not number their stops": {"stop_times.txt": (stop_times_header, stop_times + [["t3", "25:00:00", "25:00:00", "B2", "5", "", "0"]])},
+            "characters other than letters and digits": {
+                "routes.txt": (FIXTURE["routes.txt"][0], [["r77a", "77/A", "Citywest - Ringsend"], ["r27", "27", "Jobstown - Clare Hall"]])
+            },
         }
         for message, changes in cases.items():
             with self.subTest(message=message), tempfile.TemporaryDirectory() as temp_dir:
@@ -198,7 +217,8 @@ class BusJsonBuilderTest(unittest.TestCase):
             keys = [entry["key"] for entry in entries]
             self.assertIn("bus/bus-1-fixture/stops.json", keys)
             self.assertIn("bus/bus-1-fixture/shards/000.json", keys)
-            self.assertEqual(len(keys), 6)
+            self.assertIn("bus/bus-1-fixture/trips/77A.json", keys)
+            self.assertEqual(len(keys), 8)
             for entry in entries:
                 source = version_dir / entry["key"].removeprefix("bus/bus-1-fixture/")
                 self.assertEqual(gzip.decompress(Path(entry["file"]).read_bytes()), source.read_bytes())

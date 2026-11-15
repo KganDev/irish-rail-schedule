@@ -112,11 +112,11 @@ export default {
       }
       if (url.pathname === "/bus/latest.json") return serveR2Object(request, env, "bus/latest.json", SHORT_60, false, ctx)
       if (url.pathname === "/bus/status.json") return serveR2Object(request, env, "bus/status.json", SHORT_30, false, ctx)
-      const bus = url.pathname.match(/^\/bus\/([A-Za-z0-9-]+)\/(?:([a-z_]+\.json)|shards\/(\d{1,6}\.json))$/)
+      const bus = url.pathname.match(/^\/bus\/([A-Za-z0-9-]+)\/(?:([a-z_]+\.json)|(shards\/\d{1,6}\.json)|(trips\/[A-Za-z0-9]{1,12}\.json))$/)
       if (bus) {
-        const [, ver, file, shard] = bus
+        const [, ver, file, shard, trips] = bus
         if (file && !BUS_FILES.has(file)) return new Response(JSON.stringify({ error: "invalid file" }), { status: 400, headers: withCommon(cors()) })
-        return serveGzippedObject(request, env, `bus/${ver}/${file ?? `shards/${shard}`}`)
+        return serveGzippedObject(request, env, `bus/${ver}/${file ?? shard ?? trips}`)
       }
       return new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: withCommon(cors()) })
     } catch (err: any) {

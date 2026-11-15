@@ -1,9 +1,10 @@
 import { DurableObject } from "cloudflare:workers"
 import type { Env } from "./index"
-import { buildLiveFile, type Feed } from "./live"
+import { buildLiveFile, type Feed, type VehicleFeed } from "./live"
 
 const FEED_URL = "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates?format=json"
-// The NTA allows each key one call every 60 seconds.
+const VEHICLES_URL = "https://api.nationaltransport.ie/gtfsr/v2/Vehicles?format=json"
+// The NTA allows each key one call to each feed every 60 seconds.
 const INTERVAL_MS = 61_000
 const DEFAULT_ROUTE_PREFIX = "1_"
 
@@ -25,6 +26,9 @@ interface LiveStatus {
   feedTrips?: number
   trips?: number
   updates?: number
+  vehicles?: number
+  // Set when delays were published but bus positions could not be read.
+  vehiclesError?: string
   outputBytes?: number
 }
 
@@ -72,13 +76,19 @@ export class LiveFeed extends DurableObject<Env> {
   private async publish(): Promise<Partial<LiveStatus>> {
     if (!this.env.NTA_API) throw new Error("NTA_API secret is not set")
 
-    const response = await fetch(FEED_URL, { headers: { "x-api-key": this.env.NTA_API } })
+    const headers = { "x-api-key": this.env.NTA_API }
+    const [response, vehicles] = await Promise.all([
+      fetch(FEED_URL, { headers }),
+      // Delays are still worth publishing when positions fail, so this never throws.
+      this.vehicles(headers)
+    ])
     if (!response.ok) throw new Error(`NTA feed returned HTTP ${response.status}`)
     const text = await response.text()
 
     const { file, stats } = buildLiveFile(
       JSON.parse(text) as Feed,
-      this.env.LIVE_ROUTE_PREFIX || DEFAULT_ROUTE_PREFIX
+      this.env.LIVE_ROUTE_PREFIX || DEFAULT_ROUTE_PREFIX,
+      vehicles.feed
     )
     const body = JSON.stringify(file)
     await this.env.GTFS.put(LIVE_KEY, body, { httpMetadata: { contentType: "application/json" } })
@@ -89,7 +99,19 @@ export class LiveFeed extends DurableObject<Env> {
       feedTrips: stats.feedTrips,
       trips: stats.trips,
       updates: stats.updates,
+      vehicles: stats.vehicles,
+      vehiclesError: vehicles.error,
       outputBytes: body.length
+    }
+  }
+
+  private async vehicles(headers: Record<string, string>): Promise<{ feed?: VehicleFeed; error?: string }> {
+    try {
+      const response = await fetch(VEHICLES_URL, { headers })
+      if (!response.ok) return { error: `NTA positions returned HTTP ${response.status}` }
+      return { feed: (await response.json()) as VehicleFeed }
+    } catch (err: any) {
+      return { error: String(err?.message || err) }
     }
   }
 }
