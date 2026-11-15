@@ -77,7 +77,10 @@ left out. `trip_id` and `stop_sequence` match the live feed below.
 A trip file lists the route's `stops` once and its stop `patterns` as positions in that
 list. Each trip is `[pattern, seconds after midnight at the first stop, seconds between
 each stop and the next]`. A stop's `stop_sequence` is its place in the pattern, counting
-from 1, and the last stop is included.
+from 1, and the last stop is included. Where the feed has the line a trip follows, the
+trip ends with a position in `shapes`, which holds each line as
+[encoded polyline](https://developers.google.com/maps/documentation/utilities/polylinealgorithm)
+text.
 
 Versioned files are stored gzipped in R2 and sent as stored. Feeds with missing
 columns, unknown trips or stops, unreadable times, too few rows, or fewer than

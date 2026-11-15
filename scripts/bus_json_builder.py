@@ -74,6 +74,53 @@ def _service_dates(calendar_rows: List[Dict], calendar_dates: List[Dict], servic
     return dates
 
 
+def _encode_polyline(points: List[Tuple[float, float]]) -> str:
+    """Packs a line of (latitude, longitude) points into Google's polyline text.
+
+    Each point is stored as its difference from the one before, to five decimal places
+    (about a metre), so a route's shape is a few kilobytes and not a long list of numbers.
+    """
+    out: List[str] = []
+    previous = (0, 0)
+    for lat, lon in points:
+        current = (round(lat * 1e5), round(lon * 1e5))
+        for value in (current[0] - previous[0], current[1] - previous[1]):
+            value = ~(value << 1) if value < 0 else value << 1
+            while value >= 0x20:
+                out.append(chr((0x20 | (value & 0x1F)) + 63))
+                value >>= 5
+            out.append(chr(value + 63))
+        previous = current
+    return "".join(out)
+
+
+def _read_shapes(z: ZipView) -> Dict[str, str]:
+    """Every shape in shapes.txt as polyline text. Empty when the feed has no shapes."""
+    shapes_file = z.open_text("shapes.txt")
+    if shapes_file is None:
+        return {}
+    reader = csv.reader(shapes_file)
+    column = {name: index for index, name in enumerate(next(reader, []))}
+    needed = ("shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence")
+    if any(name not in column for name in needed):
+        return {}
+    points: Dict[str, List[Tuple[int, float, float]]] = {}
+    for row in reader:
+        try:
+            point = (
+                int(row[column["shape_pt_sequence"]]),
+                float(row[column["shape_pt_lat"]]),
+                float(row[column["shape_pt_lon"]]),
+            )
+        except ValueError:
+            continue
+        points.setdefault(row[column["shape_id"]], []).append(point)
+    return {
+        shape_id: _encode_polyline([(lat, lon) for _, lat, lon in sorted(shape_points)])
+        for shape_id, shape_points in points.items()
+    }
+
+
 def _route_sort_key(name: str) -> Tuple[int, str]:
     digits = re.match(r"\d+", name)
     return (int(digits.group()) if digits else 10**6, name)
@@ -173,6 +220,7 @@ def build(
             errors.append(f"trip {row['trip_id']} uses unknown route {row['route_id']}")
             continue
         trips[row["trip_id"]] = (route_name, (row.get("trip_headsign") or "").strip(), row["service_id"])
+    trip_shapes = {row["trip_id"]: row.get("shape_id") or "" for row in trip_rows}
 
     services = {service for _, _, service in trips.values()}
     service_dates = _service_dates(calendar_rows, calendar_dates, services)
@@ -300,13 +348,15 @@ def build(
 
     # One file per route with every stop of every trip, for showing a whole journey. Trips
     # on a route share a few stop patterns, and the gaps between stops repeat, so this
-    # stays small.
+    # stays small. Each trip also names the line it follows on a map, where the feed has it.
+    shapes = _read_shapes(z)
     trips_by_route: Dict[str, List[str]] = {}
     for trip_id in trip_stops:
         trips_by_route.setdefault(trips[trip_id][0], []).append(trip_id)
     for route_name, trip_ids in trips_by_route.items():
         stop_index: Dict[str, int] = {}
         pattern_index: Dict[Tuple[int, ...], int] = {}
+        shape_index: Dict[str, int] = {}
         route_trips = {}
         for trip_id in sorted(trip_ids):
             stops_of_trip = trip_stops[trip_id]
@@ -317,11 +367,15 @@ def build(
                 times[0],
                 [later - earlier for earlier, later in zip(times, times[1:])],
             ]
+            shape_id = trip_shapes.get(trip_id, "")
+            if shape_id in shapes:
+                route_trips[trip_id].append(shape_index.setdefault(shape_id, len(shape_index)))
         _dump(
             {
                 "version": FORMAT_VERSION,
                 "stops": list(stop_index),
                 "patterns": [list(pattern) for pattern in pattern_index],
+                "shapes": [shapes[shape_id] for shape_id in shape_index],
                 "trips": route_trips,
             },
             version_dir / "trips" / f"{route_name}.json",

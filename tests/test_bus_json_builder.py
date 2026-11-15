@@ -171,6 +171,31 @@ class BusJsonBuilderTest(unittest.TestCase):
             self.assertEqual(route["trips"], {"t1": [0, 28800, [630, 1170]], "t3": [1, 87000, [1800]]})
             self.assertEqual(list(self.read(version_dir, "trips/77A.json")["trips"]), ["t2"])
 
+    def test_trips_name_the_line_they_follow_when_the_feed_has_shapes(self):
+        trips_header, trips = FIXTURE["trips.txt"]
+        changes = {
+            "trips.txt": (
+                trips_header + ["shape_id"],
+                [trips[0] + ["north"], trips[1] + ["missing"], trips[2] + ["north"]],
+            ),
+            "shapes.txt": (
+                ["shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"],
+                # Out of order, to show the points are put in sequence.
+                [["north", "40.7", "-120.95", "2"], ["north", "38.5", "-120.2", "1"], ["north", "43.252", "-126.453", "3"]],
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            version_dir, _ = self.build(Path(temp_dir), changes)
+            route = self.read(version_dir, "trips/27.json")
+            # The standard example for this encoding.
+            self.assertEqual(route["shapes"], ["_p~iF~ps|U_ulLnnqC_mqNvxq`@"])
+            self.assertEqual(route["trips"]["t1"], [0, 28800, [630, 1170], 0])
+            self.assertEqual(route["trips"]["t3"], [1, 87000, [1800], 0])
+            # A trip whose shape the feed does not have carries no line.
+            other = self.read(version_dir, "trips/77A.json")
+            self.assertEqual(other["shapes"], [])
+            self.assertEqual(other["trips"]["t2"], [0, 27000, [60, 1140]])
+
     def test_status_reports_counts_and_service_dates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             version_dir, _ = self.build(Path(temp_dir))
